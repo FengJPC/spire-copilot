@@ -1,0 +1,36 @@
+{
+  "name": "spire-copilot",
+  "version": "0.1.0",
+  "description": "A compact, safety-aware MCP copilot for playing modded Slay the Spire.",
+  "author": {
+    "name": "FengJ",
+    "url": "https://github.com/FengJPC"
+  },
+  "homepage": "https://github.com/FengJPC/spire-copilot",
+  "repository": "https://github.com/FengJPC/spire-copilot",
+  "license": "MIT",
+  "keywords": [
+    "slay-the-spire",
+    "game",
+    "mcp",
+    "codex"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Spire Copilot",
+    "shortDescription": "Play Slay the Spire through a safer, compact MCP bridge.",
+    "longDescription": "Connects Codex to MCP The Spire through compact state responses, settled turn transitions, and guards for Normality, changing targets, duplicate end turns, and shop reindexing.",
+    "developerName": "FengJ",
+    "category": "Games",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Read my current Slay the Spire run and continue safely.",
+      "Explain this deck and recommend the next action."
+    ],
+    "brandColor": "#C98932"
+  }
+}
+
