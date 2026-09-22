@@ -12,9 +12,11 @@ let sessionId;
 let requestId = 1;
 let toolCache;
 let previousState;
+let previousRunContext;
 let gameInitialized = false;
 let combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
 let turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
+let mapCache = { act: null, nodes: null, version: null, emittedVersion: null };
 
 const NORMALITY_IDS = new Set(["Normality"]);
 const NORMALITY_NAMES = new Set(["Normality", "凡庸"]);
@@ -51,9 +53,11 @@ function resetGameConnection() {
   sessionId = undefined;
   toolCache = undefined;
   previousState = undefined;
+  previousRunContext = undefined;
   gameInitialized = false;
   combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
   turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
+  mapCache = { act: null, nodes: null, version: null, emittedVersion: null };
 }
 
 async function initializeGame() {
@@ -123,13 +127,31 @@ async function waitUntilReady({ timeout = timeoutMs } = {}) {
   } while (true);
 }
 
-async function enrichCombat(state) {
-  if (state.room_phase !== "COMBAT") return state;
-  const detailed = parseState((await rawTool("get_game_state", { include: ["combat"] })).message);
-  const combat = detailed?.game_state?.combat_state;
-  if (!combat) return state;
-  return {
+async function enrichRunAndCombat(state) {
+  if (!state.in_game) return state;
+  if (state.floor === 0 && mapCache.act !== null) {
+    mapCache = { act: null, nodes: null, version: null, emittedVersion: null };
+  }
+  const include = ["deck", "relics", "potions"];
+  if (state.room_phase === "COMBAT") include.push("combat");
+  const detailed = parseState((await rawTool("get_game_state", { include })).message);
+  const game = detailed?.game_state;
+  if (!game) return state;
+  const next = {
     ...state,
+    run_detail: {
+      act: game.act,
+      class: game.class,
+      boss: game.act_boss,
+      deck: game.deck ?? [],
+      relics: game.relics ?? [],
+      potions: game.potions ?? [],
+    },
+  };
+  const combat = game.combat_state;
+  if (!combat) return next;
+  return {
+    ...next,
     hand: combat.hand ?? state.hand,
     monsters: combat.monsters ?? state.monsters,
     combat_detail: {
@@ -146,15 +168,41 @@ async function enrichCombat(state) {
 
 async function enrichMap(state) {
   if (state.screen_type !== "MAP") return state;
+  const act = state.run_detail?.act ?? null;
+  if (mapCache.nodes && mapCache.act === act) {
+    return { ...state, map: mapCache.nodes, map_version: mapCache.version };
+  }
   const detailed = parseState((await rawTool("get_game_state", { include: ["map"] })).message);
   const map = detailed?.game_state?.map;
   if (!Array.isArray(map)) return state;
-  return { ...state, map };
+  const version = `act-${act ?? "unknown"}-${map.length}`;
+  mapCache = { act, nodes: map, version, emittedVersion: null };
+  return { ...state, map, map_version: version };
+}
+
+function isStableDecisionState(state) {
+  if (state.room_phase !== "COMBAT") return true;
+  if (!Number.isFinite(state.combat_detail?.turn)) return false;
+  if (liveMonsters(state).some((monster) => !monster.intent || monster.intent === "DEBUG")) return false;
+  const openingFrameLooksIncomplete = state.combat_detail.turn === 1
+    && state.current_energy === 0
+    && !state.hand?.length
+    && state.combat_detail.draw_count > 0;
+  return !openingFrameLooksIncomplete;
 }
 
 async function decisionState() {
-  let state = await waitUntilReady();
-  state = await enrichCombat(state);
+  const started = Date.now();
+  let state;
+  do {
+    state = await waitUntilReady({ timeout: Math.max(1, timeoutMs - (Date.now() - started)) });
+    state = await enrichRunAndCombat(state);
+    if (isStableDecisionState(state)) break;
+    if (Date.now() - started >= timeoutMs) {
+      throw new Error(`Timed out after ${timeoutMs}ms waiting for a stable game state`);
+    }
+    await sleep(pollMs);
+  } while (true);
   state = await enrichMap(state);
   syncEndTurnSafety(state);
   return state;
@@ -371,7 +419,108 @@ function compactMapNode(node) {
   return value;
 }
 
-function compactState(state) {
+function compactDeckCard(card) {
+  return {
+    id: card.id,
+    n: card.name,
+    ...(card.upgrades ? { u: card.upgrades } : {}),
+  };
+}
+
+function compactRelic(relic) {
+  return {
+    id: relic.id,
+    n: relic.name,
+    ...(Number.isFinite(relic.counter) && relic.counter >= 0 ? { c: relic.counter } : {}),
+  };
+}
+
+function compactPotion(potion, index) {
+  return {
+    slot: index + 1,
+    id: potion.id,
+    n: potion.name,
+  };
+}
+
+function compactScreenCard(card) {
+  return {
+    id: card.id,
+    n: card.name,
+    ...(Number.isFinite(card.cost) ? { c: card.cost } : {}),
+    ...(card.type ? { type: card.type } : {}),
+    ...(Number.isFinite(card.damage) && card.damage >= 0 ? { d: card.damage } : {}),
+    ...(Number.isFinite(card.block) && card.block >= 0 ? { b: card.block } : {}),
+    ...(card.magic_number ? { m: card.magic_number } : {}),
+    ...(card.upgrades ? { u: card.upgrades } : {}),
+    ...(card.exhausts ? { x: true } : {}),
+    ...(Number.isFinite(card.price) ? { price: card.price } : {}),
+  };
+}
+
+function compactStoreItem(item) {
+  return {
+    id: item.id,
+    n: item.name,
+    ...(Number.isFinite(item.price) ? { price: item.price } : {}),
+    ...(Number.isFinite(item.counter) && item.counter >= 0 ? { c: item.counter } : {}),
+  };
+}
+
+function compactScreenDetails(state) {
+  const details = normalizeDisplayedChoiceIndices(state.screen_state);
+  if (state.screen_type === "HAND_SELECT") {
+    return {
+      max_cards: details.max_cards,
+      can_pick_zero: details.can_pick_zero,
+      selected: (details.selected ?? []).map((card) => ({ id: card.id, n: card.name })),
+    };
+  }
+  if (state.screen_type === "CARD_REWARD") {
+    return {
+      cards: (details.cards ?? []).map(compactScreenCard),
+      bowl_available: details.bowl_available,
+      skip_available: details.skip_available,
+    };
+  }
+  if (state.screen_type === "SHOP_SCREEN") {
+    return {
+      cards: (details.cards ?? []).map(compactScreenCard),
+      relics: (details.relics ?? []).map(compactStoreItem),
+      potions: (details.potions ?? []).map(compactStoreItem),
+      purge_cost: details.purge_cost,
+      purge_available: details.purge_available,
+    };
+  }
+  if (state.screen_type === "EVENT" && Array.isArray(details.options)) {
+    return {
+      event_id: details.event_id,
+      event_name: details.event_name,
+      body_text: details.body_text,
+      options: details.options.map((option) => ({
+        ...(Number.isInteger(option.choice_index) ? { i: option.choice_index } : {}),
+        ...(option.disabled ? { disabled: true } : {}),
+        text: option.text,
+      })),
+    };
+  }
+  return details;
+}
+
+function compactRunContext(state) {
+  const run = state.run_detail;
+  if (!run) return undefined;
+  return {
+    act: run.act,
+    class: run.class,
+    boss: run.boss,
+    deck: (run.deck ?? []).map(compactDeckCard),
+    relics: (run.relics ?? []).map(compactRelic),
+    potions: (run.potions ?? []).map(compactPotion),
+  };
+}
+
+function compactState(state, { includeMap = true } = {}) {
   const out = {
     ready: state.ready_for_command,
     room: state.room_type,
@@ -414,39 +563,124 @@ function compactState(state) {
     out.choices = state.choice_list.map((text, index) => ({ i: index + 1, text }));
   }
   if (state.screen_state && Object.keys(state.screen_state).length) {
-    out.details = normalizeDisplayedChoiceIndices(state.screen_state);
+    out.details = compactScreenDetails(state);
   }
-  if (state.screen_type === "MAP" && state.map?.length) out.map = state.map.map(compactMapNode);
+  if (state.screen_type === "MAP" && state.map_version) out.map_ref = state.map_version;
+  if (includeMap && state.screen_type === "MAP" && state.map?.length) out.map = state.map.map(compactMapNode);
   if (state.can_proceed) out.proceed = state.proceed_button ?? true;
   if (state.can_cancel) out.cancel = state.cancel_button ?? true;
   return out;
 }
 
-function diffValue(before, after) {
+function multisetDifference(before, after) {
+  const remaining = new Map();
+  for (const item of after) {
+    const key = JSON.stringify(item);
+    const entry = remaining.get(key) ?? { item, count: 0 };
+    entry.count += 1;
+    remaining.set(key, entry);
+  }
+  const removed = [];
+  for (const item of before) {
+    const key = JSON.stringify(item);
+    const entry = remaining.get(key);
+    if (entry?.count) entry.count -= 1;
+    else removed.push(item);
+  }
+  const added = [];
+  for (const { item, count } of remaining.values()) {
+    for (let index = 0; index < count; index += 1) added.push(item);
+  }
+  return { removed, added };
+}
+
+function entityArrayDifference(before, after) {
+  const keyFor = (item) => item?.i ?? item?.id ?? item?.slot;
+  const beforeMap = new Map(before.map((item) => [keyFor(item), item]));
+  const afterMap = new Map(after.map((item) => [keyFor(item), item]));
+  if ([...beforeMap.keys(), ...afterMap.keys()].some((key) => key === undefined)) return undefined;
+  const changed = [];
+  for (const [key, item] of afterMap) {
+    if (!beforeMap.has(key)) changed.push({ key, added: item });
+    else {
+      const delta = diffValue(beforeMap.get(key), item);
+      if (delta !== undefined) changed.push({ key, ...delta });
+    }
+  }
+  const removed = [...beforeMap.keys()].filter((key) => !afterMap.has(key));
+  return changed.length || removed.length ? { changed, ...(removed.length ? { removed } : {}) } : undefined;
+}
+
+function diffValue(before, after, key = "") {
   if (JSON.stringify(before) === JSON.stringify(after)) return undefined;
-  if (!before || !after || typeof before !== "object" || typeof after !== "object" || Array.isArray(before) || Array.isArray(after)) {
+  if (Array.isArray(before) && Array.isArray(after)) {
+    if (["hand", "deck"].includes(key)) {
+      const { removed, added } = multisetDifference(before, after);
+      return {
+        ...(removed.length ? { removed } : {}),
+        ...(added.length ? { added } : {}),
+      };
+    }
+    const entityDelta = entityArrayDifference(before, after);
+    return entityDelta ?? after;
+  }
+  if (!before || !after || typeof before !== "object" || typeof after !== "object") {
     return after;
   }
   const result = {};
   for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
     if (!(key in after)) result[key] = null;
     else {
-      const change = diffValue(before[key], after[key]);
+      const change = diffValue(before[key], after[key], key);
       if (change !== undefined) result[key] = change;
     }
   }
   return Object.keys(result).length ? result : undefined;
 }
 
+function compactRunDelta(before, after) {
+  if (!before) return { run_context: after };
+  const delta = diffValue(before, after);
+  if (!delta) return {};
+  const named = {};
+  for (const [key, value] of Object.entries(delta)) {
+    if (key === "relics") named.relic_changes = value;
+    else if (key === "deck") named.deck_changes = value;
+    else if (key === "potions") named.potion_changes = value;
+    else named[key] = value;
+  }
+  return { run_delta: named };
+}
+
 function emit(payload) {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
 }
 
-function rememberAndCompact(state, deltaOnly = false) {
-  const compact = compactState(state);
+function actionSummary(action, extra = {}) {
+  return {
+    action: action.action,
+    ...(action.card_name ? { card: action.card_name } : {}),
+    ...(!action.card_name && action.card_id ? { card: action.card_id } : {}),
+    ...(action.card_index ? { card_index: action.card_index } : {}),
+    ...(action.target_index ? { target: action.target_index } : {}),
+    ...(action.choice_text ? { choice: action.choice_text } : {}),
+    ...(!action.choice_text && action.choice_index ? { choice_index: action.choice_index } : {}),
+    ...(action.potion_slot ? { potion_slot: action.potion_slot } : {}),
+    ...extra,
+  };
+}
+
+function rememberAndCompact(state, deltaOnly = false, actionResult = undefined) {
+  const includeMap = state.map_version && mapCache.emittedVersion !== state.map_version;
+  const compact = compactState(state, { includeMap });
   const change = previousState ? diffValue(previousState, compact) : compact;
+  const runContext = compactRunContext(state);
+  const runPayload = runContext ? compactRunDelta(previousRunContext, runContext) : {};
   previousState = compact;
-  return deltaOnly ? { delta: change ?? {} } : compact;
+  if (runContext) previousRunContext = runContext;
+  if (includeMap) mapCache.emittedVersion = state.map_version;
+  if (actionResult) return { result: actionResult, changes: change ?? {}, ...runPayload };
+  return deltaOnly ? { delta: change ?? {}, ...runPayload } : { ...compact, ...runPayload };
 }
 
 async function listTools() {
@@ -502,7 +736,7 @@ async function safeExecuteActions(actions, wait = true) {
     await sleep(settleMs);
     state = await decisionState();
     syncCombatSafety(state);
-    return rememberAndCompact(state);
+    return rememberAndCompact(state, false, { action: "act_many", completed: actions.length });
   }
 
   preflightCombatActions(state, actions);
@@ -554,7 +788,7 @@ async function safeExecuteActions(actions, wait = true) {
         reason: "SAFETY enemy roster changed; remaining targeted actions were not executed because target_index values may have shifted",
         completed_actions: index + 1,
         remaining_actions: remaining,
-        state: rememberAndCompact(state),
+        state: rememberAndCompact(state, false, { action: "act_many", completed: index + 1 }),
       };
     }
     if (remaining.length && turnChanged) {
@@ -563,12 +797,12 @@ async function safeExecuteActions(actions, wait = true) {
         reason: "SAFETY turn changed before the batch ended; remaining actions were not executed",
         completed_actions: index + 1,
         remaining_actions: remaining,
-        state: rememberAndCompact(state),
+        state: rememberAndCompact(state, false, { action: "act_many", completed: index + 1 }),
       };
     }
   }
 
-  return rememberAndCompact(state);
+  return rememberAndCompact(state, false, { action: "act_many", completed: normalizedActions.length });
 }
 
 async function callAndSettle(name, args = {}, wait = true) {
@@ -607,12 +841,12 @@ async function callAndSettle(name, args = {}, wait = true) {
       turn: callState.combat_detail.turn,
     });
     syncCombatSafety(state);
-    return rememberAndCompact(state);
+    return rememberAndCompact(state, false, actionSummary({ action: name, ...callArgs }));
   }
   await sleep(settleMs);
   const state = await decisionState();
   syncCombatSafety(state);
-  return rememberAndCompact(state);
+  return rememberAndCompact(state, false, actionSummary({ action: name, ...callArgs }));
 }
 
 function runSafetySelfTests() {
@@ -706,23 +940,96 @@ function runSafetySelfTests() {
     screen_state: { options: [{ choice_index: 0 }, { choice_index: 1 }] },
   });
   if (compactEvent.choices[0].i !== 1 || compactEvent.choices[1].i !== 2
-      || compactEvent.details.options[0].choice_index !== 1
-      || compactEvent.details.options[1].choice_index !== 2) {
+      || compactEvent.details.options[0].i !== 1
+      || compactEvent.details.options[1].i !== 2) {
     throw new Error("Self-test failed: displayed choices were not normalized to 1-based indices");
   }
 
   const compactMap = compactState({
     ready_for_command: true,
     screen_type: "MAP",
+    map_version: "act-1-1",
     map: [{ x: 1, y: 0, symbol: "M", children: [{ x: 2, y: 1 }] }],
   });
-  if (compactMap.map?.[0]?.s !== "M" || compactMap.map[0].to?.[0]?.join(",") !== "2,1") {
+  if (compactMap.map_ref !== "act-1-1" || compactMap.map?.[0]?.s !== "M" || compactMap.map[0].to?.[0]?.join(",") !== "2,1") {
     throw new Error("Self-test failed: full map graph was not compacted correctly");
+  }
+
+  const semanticHandDelta = diffValue(
+    { hand: [{ n: "打击", c: 1 }, { n: "防御", c: 1 }] },
+    { hand: [{ n: "防御", c: 1 }] },
+  );
+  if (semanticHandDelta.hand.removed?.[0]?.n !== "打击" || semanticHandDelta.hand.added) {
+    throw new Error("Self-test failed: hand delta was not semantic");
+  }
+
+  const semanticEnemyDelta = diffValue(
+    { enemies: [{ i: 1, n: "大颚虫", hp: "44/44" }] },
+    { enemies: [{ i: 1, n: "大颚虫", hp: "36/44" }] },
+  );
+  if (semanticEnemyDelta.enemies.changed?.[0]?.hp !== "36/44") {
+    throw new Error("Self-test failed: enemy delta did not isolate the changed entity");
+  }
+
+  const runDelta = compactRunDelta(
+    { deck: [], relics: [{ id: "Ring", n: "蛇之戒指" }], potions: [] },
+    { deck: [], relics: [{ id: "Ring", n: "蛇之戒指" }, { id: "Letter Opener", n: "开信刀" }], potions: [] },
+  );
+  if (runDelta.run_delta?.relic_changes?.changed?.[0]?.added?.n !== "开信刀") {
+    throw new Error("Self-test failed: newly acquired relic was not reported");
+  }
+
+  if (isStableDecisionState({
+    room_phase: "COMBAT",
+    current_energy: 0,
+    combat_detail: { turn: 1, draw_count: 12 },
+    monsters: [{ name: "敌人", intent: "DEBUG", is_gone: false }],
+  })) {
+    throw new Error("Self-test failed: transient DEBUG combat state was treated as stable");
   }
 
   combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
   turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
-  process.stdout.write("Safety self-tests passed: Normality, target reindex, named shop choice, settled end-turn, 1-based choices, and map graph\n");
+  process.stdout.write("Self-tests passed: safety guards, stable combat state, 1-based choices, map graph, semantic delta, and run changes\n");
+}
+
+function runSyntheticBenchmark() {
+  const before = {
+    ready: true,
+    room: "MonsterRoom",
+    screen: "NONE",
+    floor: 5,
+    hp: "77/77",
+    gold: 40,
+    energy: "3/3",
+    turn: 2,
+    enemies: [{ i: 1, n: "大颚虫", hp: "35/44", intent: "ATTACK_DEFEND", atk: 7 }],
+    hand: [
+      { n: "防御", c: 1, b: 5 }, { n: "中和", c: 0, d: 3, m: 1, t: true },
+      { n: "防御", c: 1, b: 5 }, { n: "飞膝", c: 1, d: 8, t: true }, { n: "防御", c: 1, b: 5 },
+    ],
+  };
+  const after = {
+    ...before,
+    energy: "1/3",
+    block: 5,
+    enemies: [{ i: 1, n: "大颚虫", hp: "24/44", intent: "ATTACK_DEFEND", atk: 5, powers: [{ id: "Weakened", n: 1 }] }],
+    hand: [{ n: "防御", c: 1, b: 5 }, { n: "防御", c: 1, b: 5 }],
+  };
+  const bytes = (value) => Buffer.byteLength(JSON.stringify(value), "utf8");
+  const repeatedCompact = bytes(before) + bytes(after);
+  const deltaBytes = bytes({ delta: diffValue(before, after) });
+  const initialPlusDelta = bytes(before) + deltaBytes;
+  process.stdout.write(`${JSON.stringify({
+    fixture: "single-combat-decision",
+    repeated_state_bytes_per_followup: bytes(after),
+    semantic_delta_bytes_per_followup: deltaBytes,
+    followup_reduction_percent: Number(((1 - deltaBytes / bytes(after)) * 100).toFixed(1)),
+    repeated_compact_bytes: repeatedCompact,
+    initial_plus_semantic_delta_bytes: initialPlusDelta,
+    reduction_percent: Number(((1 - initialPlusDelta / repeatedCompact) * 100).toFixed(1)),
+    note: "Synthetic regression fixture; not a published real-run token claim",
+  }, null, 2)}\n`);
 }
 
 async function handle(line) {
@@ -757,6 +1064,11 @@ if (process.argv.includes("--self-test")) {
   process.exit(0);
 }
 
+if (process.argv.includes("--benchmark")) {
+  runSyntheticBenchmark();
+  process.exit(0);
+}
+
 const ACTION_PROPERTIES = {
   action: {
     type: "string",
@@ -774,7 +1086,7 @@ const ACTION_PROPERTIES = {
 const PLUGIN_TOOLS = [
   {
     name: "get_state",
-    description: "Read the settled Slay the Spire state. compact is the normal low-token view; delta returns changes since the previous read; full is diagnostic and verbose.",
+    description: "Read settled game state. compact sends run context and the full map once per run/act; delta returns semantic changes; full is diagnostic and verbose.",
     inputSchema: {
       type: "object",
       properties: { mode: { type: "string", enum: ["compact", "delta", "full"], default: "compact" } },
@@ -784,7 +1096,7 @@ const PLUGIN_TOOLS = [
   },
   {
     name: "act",
-    description: "Perform one safe game action and return settled compact state. Shop choices must use choice_text. end_turn waits for the next turn and rejects duplicates.",
+    description: "Perform one safe action and return an action receipt plus settled semantic changes. Shop purchases require choice_text. end_turn waits for the next turn and rejects duplicates.",
     inputSchema: {
       type: "object",
       properties: { ...ACTION_PROPERTIES, wait: { type: "boolean", default: true } },
@@ -795,7 +1107,7 @@ const PLUGIN_TOOLS = [
   },
   {
     name: "act_many",
-    description: "Execute a short safe action sequence serially. Stops if the turn or enemy roster changes. Never batch multiple shop purchases; send lethal targeted attacks separately.",
+    description: "Execute a short safe sequence serially and return settled semantic changes. Stops if the turn or enemy roster changes. Never batch shop purchases; send lethal targeted attacks separately.",
     inputSchema: {
       type: "object",
       properties: {

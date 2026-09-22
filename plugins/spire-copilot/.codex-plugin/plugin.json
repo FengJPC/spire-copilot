@@ -1,6 +1,6 @@
 {
   "name": "spire-copilot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A compact, safety-aware MCP copilot for playing modded Slay the Spire.",
   "author": {
     "name": "FengJ",
@@ -20,7 +20,7 @@
   "interface": {
     "displayName": "Spire Copilot",
     "shortDescription": "Play Slay the Spire through a safer, compact MCP bridge.",
-    "longDescription": "Connects Codex to MCP The Spire through compact state responses, settled turn transitions, and guards for Normality, changing targets, duplicate end turns, and shop reindexing.",
+    "longDescription": "Connects Codex to MCP The Spire through one-time run context, semantic action deltas, stable turn transitions, and safety guards for Normality, changing targets, duplicate end turns, and shop reindexing.",
     "developerName": "FengJ",
     "category": "Games",
     "capabilities": [
@@ -33,4 +33,3 @@
     "brandColor": "#C98932"
   }
 }
-

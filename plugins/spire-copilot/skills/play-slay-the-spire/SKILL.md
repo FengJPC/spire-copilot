@@ -13,11 +13,13 @@ Use the `spire_copilot` MCP tools for live game state and actions.
 2. Treat live state and explicit user corrections as authoritative. Do not carry removed cards, temporary powers, or old enemy indices forward from memory.
 3. If the game endpoint is unavailable, ask the user to start ModTheSpire with `MCP The Spire` enabled and enter the save. Do not ask them to start a separate relay.
 4. All game indices are 1-based.
-5. On the map screen, compact state includes the full route graph in `map`; each node uses `s` for its room symbol and `to` for child coordinates.
+5. The first compact state includes `run_context`; later deck, relic, and potion updates arrive in `run_delta`.
+6. The first map state in an act includes the full route graph in `map`; later map states use `map_ref` plus current/next nodes. Each map node uses `s` for its room symbol and `to` for child coordinates.
 
 ## Acting safely
 
 - Prefer `act` for individual decisions. Use `act_many` only for a short sequence whose targets and turn cannot change unexpectedly.
+- Action tools return a compact `result` receipt and settled `changes`; treat those changes as authoritative and call `get_state` only when the result is ambiguous or the user reports a mismatch.
 - Never resend `end_turn` after a timeout or uncertain response. Read state instead. The tool normally returns only after the next turn is ready.
 - In shops, call `choose` with a unique `choice_text`; never use a remembered numeric item index.
 - Send a known-lethal targeted attack separately, refresh state, and then target the remaining enemies.
@@ -34,6 +36,6 @@ Use the `spire_copilot` MCP tools for live game state and actions.
 
 ## Token discipline
 
-- Use compact state normally and delta only when the previous compact state is still reliable.
+- Use compact state at the start of a task. Afterwards rely on action `changes`, and use delta only when the previous state is still reliable.
 - Use full state only for diagnostics.
-- Avoid repeating the complete deck or relic list unless the user asks.
+- Do not request or repeat the complete deck, relic list, or full map after their initial context unless diagnosing a mismatch.

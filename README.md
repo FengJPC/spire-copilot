@@ -6,12 +6,16 @@ Slay the Spire run. It adds a compact, safety-aware bridge in front of the
 
 ## What it adds
 
-- Compact and delta game-state responses to reduce context usage.
+- One-time run context plus semantic state deltas to reduce context usage.
 - Settled action responses that wait for animations and turn transitions.
 - Guards for Normality, duplicate end turns, changing enemy targets, and shop
   item reindexing.
 - Consistent 1-based choice indices across state and action calls.
-- A compact full route graph whenever the map screen is open.
+- A compact full route graph once per act, followed by a small map reference.
+- Automatic reporting of deck, relic, and potion changes such as newly acquired
+  relics.
+- Filtering of transient combat frames with incomplete hands or `DEBUG`
+  intents.
 - A Codex skill that explains pivotal decisions and pauses after each combat.
 
 ## Requirements
@@ -56,6 +60,20 @@ Optional timing variables:
 - `STS_POLL_MS` (default `180`)
 - `STS_SETTLE_MS` (default `250`)
 - `STS_WAIT_TIMEOUT_MS` (default `20000`)
+
+Development checks:
+
+```powershell
+node scripts/server.mjs --self-test
+node scripts/server.mjs --benchmark
+```
+
+The benchmark is a synthetic regression fixture for comparing response shapes;
+it is not presented as a real-run token reduction claim.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes and compatibility changes.
 
 ## License
 
