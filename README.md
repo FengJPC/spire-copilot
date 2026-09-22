@@ -10,6 +10,8 @@ Slay the Spire run. It adds a compact, safety-aware bridge in front of the
 - Settled action responses that wait for animations and turn transitions.
 - Guards for Normality, duplicate end turns, changing enemy targets, and shop
   item reindexing.
+- Consistent 1-based choice indices across state and action calls.
+- A compact full route graph whenever the map screen is open.
 - A Codex skill that explains pivotal decisions and pauses after each combat.
 
 ## Requirements
@@ -58,4 +60,3 @@ Optional timing variables:
 ## License
 
 MIT
-

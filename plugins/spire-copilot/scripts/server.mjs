@@ -144,8 +144,18 @@ async function enrichCombat(state) {
   };
 }
 
+async function enrichMap(state) {
+  if (state.screen_type !== "MAP") return state;
+  const detailed = parseState((await rawTool("get_game_state", { include: ["map"] })).message);
+  const map = detailed?.game_state?.map;
+  if (!Array.isArray(map)) return state;
+  return { ...state, map };
+}
+
 async function decisionState() {
-  const state = await enrichCombat(await waitUntilReady());
+  let state = await waitUntilReady();
+  state = await enrichCombat(state);
+  state = await enrichMap(state);
   syncEndTurnSafety(state);
   return state;
 }
@@ -342,6 +352,25 @@ function compactCard(card) {
   return value;
 }
 
+function normalizeDisplayedChoiceIndices(value, key = "") {
+  if (Array.isArray(value)) return value.map((item) => normalizeDisplayedChoiceIndices(item));
+  if (!value || typeof value !== "object") {
+    return key === "choice_index" && Number.isInteger(value) ? value + 1 : value;
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([childKey, childValue]) => [
+      childKey,
+      normalizeDisplayedChoiceIndices(childValue, childKey),
+    ]),
+  );
+}
+
+function compactMapNode(node) {
+  const value = { x: node.x, y: node.y, s: node.symbol };
+  if (node.children?.length) value.to = node.children.map((child) => [child.x, child.y]);
+  return value;
+}
+
 function compactState(state) {
   const out = {
     ready: state.ready_for_command,
@@ -381,8 +410,13 @@ function compactState(state) {
     }));
   }
   if (state.hand?.length) out.hand = state.hand.map(compactCard);
-  if (state.choice_list?.length) out.choices = state.choice_list;
-  if (state.screen_state && Object.keys(state.screen_state).length) out.details = state.screen_state;
+  if (state.choice_list?.length) {
+    out.choices = state.choice_list.map((text, index) => ({ i: index + 1, text }));
+  }
+  if (state.screen_state && Object.keys(state.screen_state).length) {
+    out.details = normalizeDisplayedChoiceIndices(state.screen_state);
+  }
+  if (state.screen_type === "MAP" && state.map?.length) out.map = state.map.map(compactMapNode);
   if (state.can_proceed) out.proceed = state.proceed_button ?? true;
   if (state.can_cancel) out.cancel = state.cancel_button ?? true;
   return out;
@@ -665,9 +699,30 @@ function runSafetySelfTests() {
     throw new Error("Self-test failed: unavailable main-menu values leaked into compact state");
   }
 
+  const compactEvent = compactState({
+    ready_for_command: true,
+    screen_type: "EVENT",
+    choice_list: ["first", "second"],
+    screen_state: { options: [{ choice_index: 0 }, { choice_index: 1 }] },
+  });
+  if (compactEvent.choices[0].i !== 1 || compactEvent.choices[1].i !== 2
+      || compactEvent.details.options[0].choice_index !== 1
+      || compactEvent.details.options[1].choice_index !== 2) {
+    throw new Error("Self-test failed: displayed choices were not normalized to 1-based indices");
+  }
+
+  const compactMap = compactState({
+    ready_for_command: true,
+    screen_type: "MAP",
+    map: [{ x: 1, y: 0, symbol: "M", children: [{ x: 2, y: 1 }] }],
+  });
+  if (compactMap.map?.[0]?.s !== "M" || compactMap.map[0].to?.[0]?.join(",") !== "2,1") {
+    throw new Error("Self-test failed: full map graph was not compacted correctly");
+  }
+
   combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
   turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
-  process.stdout.write("Safety self-tests passed: Normality, target reindex, named shop choice, and settled end-turn guards\n");
+  process.stdout.write("Safety self-tests passed: Normality, target reindex, named shop choice, settled end-turn, 1-based choices, and map graph\n");
 }
 
 async function handle(line) {
@@ -783,7 +838,7 @@ function isConnectionError(error) {
 async function readPluginState(mode) {
   const read = async () => {
     const state = await decisionState();
-    if (mode === "full") return state;
+    if (mode === "full") return normalizeDisplayedChoiceIndices(state);
     return rememberAndCompact(state, mode === "delta");
   };
   try {
@@ -858,4 +913,3 @@ for await (const rawLine of rl) {
     });
   }
 }
-

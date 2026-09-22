@@ -13,6 +13,7 @@ Use the `spire_copilot` MCP tools for live game state and actions.
 2. Treat live state and explicit user corrections as authoritative. Do not carry removed cards, temporary powers, or old enemy indices forward from memory.
 3. If the game endpoint is unavailable, ask the user to start ModTheSpire with `MCP The Spire` enabled and enter the save. Do not ask them to start a separate relay.
 4. All game indices are 1-based.
+5. On the map screen, compact state includes the full route graph in `map`; each node uses `s` for its room symbol and `to` for child coordinates.
 
 ## Acting safely
 
@@ -36,5 +37,3 @@ Use the `spire_copilot` MCP tools for live game state and actions.
 - Use compact state normally and delta only when the previous compact state is still reliable.
 - Use full state only for diagnostics.
 - Avoid repeating the complete deck or relic list unless the user asks.
-
-
