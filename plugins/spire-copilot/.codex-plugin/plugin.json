@@ -1,6 +1,6 @@
 {
   "name": "spire-copilot",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "A compact, safety-aware MCP copilot for playing modded Slay the Spire.",
   "author": {
     "name": "FengJ",

@@ -2,6 +2,16 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.3] - 2026-09-23
+
+### Fixed
+
+- Wait for a combat hand-selection choice to expose its selected card and
+  `confirm` action before returning. Transient `COMBAT_REWARD` and `NONE`
+  frames are ignored instead of being reported as settled game state.
+- Add a regression test covering the transient frames observed after choosing
+  an Acrobatics discard.
+
 ## [0.2.2] - 2026-09-23
 
 ### Fixed

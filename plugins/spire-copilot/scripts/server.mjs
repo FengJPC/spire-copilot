@@ -282,6 +282,34 @@ async function waitForEndTurnSettlement(start, { timeout = timeoutMs } = {}) {
   } while (true);
 }
 
+function selectedHandCount(state) {
+  return Array.isArray(state?.screen_state?.selected) ? state.screen_state.selected.length : 0;
+}
+
+function handSelectionChoiceHasSettled(start, state) {
+  if (start?.screen_type !== "HAND_SELECT" || state?.screen_type !== "HAND_SELECT") return false;
+  return state.can_proceed === true && selectedHandCount(state) > selectedHandCount(start);
+}
+
+async function waitForHandSelectionChoiceSettlement(
+  start,
+  { timeout = timeoutMs, readState = decisionState, pause = sleep } = {},
+) {
+  const started = Date.now();
+  let state;
+  do {
+    await pause(pollMs);
+    state = await readState();
+    if (handSelectionChoiceHasSettled(start, state)) return state;
+    if (Date.now() - started >= timeout) {
+      throw new Error(
+        `Timed out after ${timeout}ms waiting for the HAND_SELECT choice to expose confirm. `
+        + "The choice was already sent; inspect state but do not resend it.",
+      );
+    }
+  } while (true);
+}
+
 function isNormality(card) {
   return NORMALITY_IDS.has(card?.id) || NORMALITY_NAMES.has(card?.name);
 }
@@ -760,7 +788,7 @@ async function safeExecuteActions(actions, wait = true) {
     const beforeRoster = monsterRosterKey(state);
     const beforeTurn = state?.combat_detail?.turn;
 
-    let settledByTurnAdvance = false;
+    let settledByDedicatedWait = false;
     if (action.action === "wait") {
       await sleep(Math.min(500, Math.max(0, Number(action.ms ?? 100))));
     } else {
@@ -778,14 +806,17 @@ async function safeExecuteActions(actions, wait = true) {
         if (toolCall.name === "play_card") combatSafety.cardsPlayed += 1;
         if (toolCall.name === "end_turn" && wait) {
           state = await waitForEndTurnSettlement({ floor: state.floor, turn: beforeTurn });
-          settledByTurnAdvance = true;
+          settledByDedicatedWait = true;
+        } else if (toolCall.name === "choose" && state.screen_type === "HAND_SELECT" && wait) {
+          state = await waitForHandSelectionChoiceSettlement(state);
+          settledByDedicatedWait = true;
         }
       } else {
         await rawTool("execute_actions", { actions: [action] });
       }
     }
 
-    if (!settledByTurnAdvance) {
+    if (!settledByDedicatedWait) {
       await sleep(settleMs);
       state = await decisionState();
     }
@@ -852,6 +883,11 @@ async function callAndSettle(name, args = {}, wait = true) {
       floor: callState.floor,
       turn: callState.combat_detail.turn,
     });
+    syncCombatSafety(state);
+    return rememberAndCompact(state, false, actionSummary({ action: name, ...callArgs }));
+  }
+  if (name === "choose" && callState?.screen_type === "HAND_SELECT") {
+    const state = await waitForHandSelectionChoiceSettlement(callState);
     syncCombatSafety(state);
     return rememberAndCompact(state, false, actionSummary({ action: name, ...callArgs }));
   }
@@ -938,6 +974,51 @@ async function runSafetySelfTests() {
   }
   if (!endTurnHasSettled(endTurnStart, { floor: 9, room_phase: "COMPLETE" })) {
     throw new Error("Self-test failed: combat completion was not treated as settled");
+  }
+
+  const handSelectStart = {
+    ready_for_command: true,
+    room_phase: "COMBAT",
+    screen_type: "HAND_SELECT",
+    can_proceed: false,
+    screen_state: { selected: [] },
+  };
+  if (handSelectionChoiceHasSettled(handSelectStart, {
+    ready_for_command: true,
+    room_phase: "COMPLETE",
+    screen_type: "COMBAT_REWARD",
+    can_proceed: true,
+    screen_state: { rewards: [] },
+  })) {
+    throw new Error("Self-test failed: transient combat reward settled a HAND_SELECT choice");
+  }
+  if (handSelectionChoiceHasSettled(handSelectStart, {
+    ...handSelectStart,
+    screen_type: "NONE",
+    can_proceed: false,
+  })) {
+    throw new Error("Self-test failed: transient NONE screen settled a HAND_SELECT choice");
+  }
+  let handSelectionReads = 0;
+  const settledHandSelection = await waitForHandSelectionChoiceSettlement(handSelectStart, {
+    timeout: 1000,
+    pause: async () => {},
+    readState: async () => {
+      handSelectionReads += 1;
+      if (handSelectionReads === 1) {
+        return { ...handSelectStart, screen_type: "COMBAT_REWARD", room_phase: "COMPLETE", can_proceed: true };
+      }
+      if (handSelectionReads === 2) return { ...handSelectStart, screen_type: "NONE" };
+      return {
+        ...handSelectStart,
+        can_proceed: true,
+        screen_state: { selected: [{ id: "Reflex", name: "本能反应+" }] },
+      };
+    },
+  });
+  if (handSelectionReads !== 3 || settledHandSelection.screen_type !== "HAND_SELECT"
+      || selectedHandCount(settledHandSelection) !== 1) {
+    throw new Error("Self-test failed: HAND_SELECT choice did not ignore transient screens");
   }
 
   const compactMenu = compactState({ ready_for_command: true, screen_type: "MAIN_MENU" });
@@ -1032,7 +1113,7 @@ async function runSafetySelfTests() {
 
   combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
   turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
-  process.stdout.write("Self-tests passed: safety guards, stable combat state, transient event reads, 1-based choices, map graph, semantic delta, and run changes\n");
+  process.stdout.write("Self-tests passed: safety guards, stable combat state, transient event and hand-selection reads, 1-based choices, map graph, semantic delta, and run changes\n");
 }
 
 function runSyntheticBenchmark() {
