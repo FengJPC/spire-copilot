@@ -2,6 +2,13 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.2] - 2026-09-23
+
+### Fixed
+
+- Clarify the poison-lethal end-turn rule: count existing Poison before the
+  enemy acts, but not Noxious Fumes or other future player-turn-start effects.
+
 ## [0.2.1] - 2026-09-23
 
 ### Fixed

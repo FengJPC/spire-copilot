@@ -25,6 +25,7 @@ Use the `spire_copilot` MCP tools for live game state and actions.
 - Send a known-lethal targeted attack separately, refresh state, and then target the remaining enemies.
 - While Normality is in hand, play no more than three cards that turn. Refresh after Normality leaves the hand.
 - Against Time Eater, read the `Time Warp` amount before every sequence. Make the twelfth card deliberate and ensure defense is already sufficient before it resolves.
+- For a poison-lethal `end_turn`, count only Poison already on the enemy: it damages them before their action. Do not count player-turn-start effects, such as Noxious Fumes, as part of the pending enemy turn.
 - Do not spend potions, buy items, remove cards, or choose rewards from stale state.
 
 ## Collaboration style
