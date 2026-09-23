@@ -114,16 +114,28 @@ async function screenState() {
   return parseState((await rawTool("get_screen_state")).message);
 }
 
-async function waitUntilReady({ timeout = timeoutMs } = {}) {
+function isTransientScreenReadError(error) {
+  return /^get_screen_state: Internal error: null$/i.test(String(error?.message ?? error).trim());
+}
+
+async function waitUntilReady({ timeout = timeoutMs, readScreen = screenState, pause = sleep } = {}) {
   const started = Date.now();
-  let state;
+  let lastScreen = "unknown";
   do {
-    state = await screenState();
-    if (state.ready_for_command) return state;
-    if (Date.now() - started >= timeout) {
-      throw new Error(`Timed out after ${timeout}ms; last screen=${state.screen_type ?? "unknown"}`);
+    try {
+      const state = await readScreen();
+      if (state?.ready_for_command) return state;
+      lastScreen = state?.screen_type ?? "unknown";
+    } catch (error) {
+      // MCP The Spire briefly returns this while an event room is opening.
+      // The action has already been sent, so retry only this state read.
+      if (!isTransientScreenReadError(error)) throw error;
+      lastScreen = `unavailable (${error.message})`;
     }
-    await sleep(pollMs);
+    if (Date.now() - started >= timeout) {
+      throw new Error(`Timed out after ${timeout}ms; last screen=${lastScreen}`);
+    }
+    await pause(pollMs);
   } while (true);
 }
 
@@ -849,7 +861,7 @@ async function callAndSettle(name, args = {}, wait = true) {
   return rememberAndCompact(state, false, actionSummary({ action: name, ...callArgs }));
 }
 
-function runSafetySelfTests() {
+async function runSafetySelfTests() {
   const baseState = {
     floor: 1,
     room_phase: "COMBAT",
@@ -988,9 +1000,39 @@ function runSafetySelfTests() {
     throw new Error("Self-test failed: transient DEBUG combat state was treated as stable");
   }
 
+  let screenReads = 0;
+  const settledEvent = await waitUntilReady({
+    timeout: 1000,
+    pause: async () => {},
+    readScreen: async () => {
+      screenReads += 1;
+      if (screenReads === 1) throw new Error("get_screen_state: Internal error: null");
+      return { ready_for_command: true, screen_type: "EVENT" };
+    },
+  });
+  if (screenReads !== 2 || settledEvent.screen_type !== "EVENT") {
+    throw new Error("Self-test failed: transient event screen read was not retried");
+  }
+
+  let unrelatedErrorWasRetried = false;
+  try {
+    await waitUntilReady({
+      timeout: 1000,
+      pause: async () => {},
+      readScreen: async () => {
+        if (unrelatedErrorWasRetried) return { ready_for_command: true, screen_type: "EVENT" };
+        unrelatedErrorWasRetried = true;
+        throw new Error("get_screen_state: permission denied");
+      },
+    });
+    throw new Error("Self-test failed: unrelated screen read error was suppressed");
+  } catch (error) {
+    if (error.message !== "get_screen_state: permission denied") throw error;
+  }
+
   combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
   turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
-  process.stdout.write("Self-tests passed: safety guards, stable combat state, 1-based choices, map graph, semantic delta, and run changes\n");
+  process.stdout.write("Self-tests passed: safety guards, stable combat state, transient event reads, 1-based choices, map graph, semantic delta, and run changes\n");
 }
 
 function runSyntheticBenchmark() {
@@ -1060,7 +1102,7 @@ async function handle(line) {
 }
 
 if (process.argv.includes("--self-test")) {
-  runSafetySelfTests();
+  await runSafetySelfTests();
   process.exit(0);
 }
 

@@ -2,6 +2,16 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.1] - 2026-09-23
+
+### Fixed
+
+- Retry the brief `get_screen_state: Internal error: null` response that can
+  occur after entering an event room. Only the read is retried; the game
+  action is never sent again.
+- Add a regression check for the event transition and ensure unrelated read
+  errors still surface immediately.
+
 ## [0.2.0] - 2026-09-22
 
 ### Added
