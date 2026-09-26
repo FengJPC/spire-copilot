@@ -23,6 +23,59 @@ const NORMALITY_NAMES = new Set(["Normality", "凡庸"]);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function resetMapCache() {
+  mapCache = { act: null, nodes: null, version: null, emittedVersion: null };
+}
+
+function numericAct(value) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function isActStartMap(state) {
+  return state?.screen_type === "MAP"
+    && state?.screen_state?.first_node_chosen === false
+    && state?.screen_state?.current_node?.y === -1;
+}
+
+function inferActFromFloor(state) {
+  if (!Number.isFinite(state?.floor) || state.floor < 0) return null;
+  if (isActStartMap(state)) return Math.floor(state.floor / 17) + 1;
+  return Math.floor(Math.max(0, state.floor - 1) / 17) + 1;
+}
+
+function resolveAct(state, game = {}) {
+  return numericAct(game.act)
+    ?? numericAct(game.act_num)
+    ?? numericAct(game.act_number)
+    ?? numericAct(state?.act)
+    ?? inferActFromFloor(state);
+}
+
+function syncMapCacheAct(act) {
+  if (act !== null && mapCache.act !== null && mapCache.act !== act) resetMapCache();
+}
+
+function mapTopologyHash(map) {
+  const topology = map.map((node) => [
+    node.x,
+    node.y,
+    node.symbol,
+    (node.children ?? []).map((child) => [child.x, child.y]),
+  ]);
+  const text = JSON.stringify(topology);
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function mapVersion(act, map) {
+  return `act-${act ?? "unknown"}-${map.length}-${mapTopologyHash(map)}`;
+}
+
 function parseRpcBody(body) {
   if (!body) return null;
   const trimmed = body.trim();
@@ -57,7 +110,7 @@ function resetGameConnection() {
   gameInitialized = false;
   combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
   turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
-  mapCache = { act: null, nodes: null, version: null, emittedVersion: null };
+  resetMapCache();
 }
 
 async function initializeGame() {
@@ -142,17 +195,19 @@ async function waitUntilReady({ timeout = timeoutMs, readScreen = screenState, p
 async function enrichRunAndCombat(state) {
   if (!state.in_game) return state;
   if (state.floor === 0 && mapCache.act !== null) {
-    mapCache = { act: null, nodes: null, version: null, emittedVersion: null };
+    resetMapCache();
   }
   const include = ["deck", "relics", "potions"];
   if (state.room_phase === "COMBAT") include.push("combat");
   const detailed = parseState((await rawTool("get_game_state", { include })).message);
   const game = detailed?.game_state;
   if (!game) return state;
+  const act = resolveAct(state, game);
+  syncMapCacheAct(act);
   const next = {
     ...state,
     run_detail: {
-      act: game.act,
+      act,
       class: game.class,
       boss: game.act_boss,
       deck: game.deck ?? [],
@@ -180,14 +235,18 @@ async function enrichRunAndCombat(state) {
 
 async function enrichMap(state) {
   if (state.screen_type !== "MAP") return state;
-  const act = state.run_detail?.act ?? null;
+  let act = state.run_detail?.act ?? resolveAct(state);
+  syncMapCacheAct(act);
   if (mapCache.nodes && mapCache.act === act) {
     return { ...state, map: mapCache.nodes, map_version: mapCache.version };
   }
   const detailed = parseState((await rawTool("get_game_state", { include: ["map"] })).message);
-  const map = detailed?.game_state?.map;
+  const game = detailed?.game_state;
+  const map = game?.map;
   if (!Array.isArray(map)) return state;
-  const version = `act-${act ?? "unknown"}-${map.length}`;
+  act = resolveAct(state, game) ?? act;
+  syncMapCacheAct(act);
+  const version = mapVersion(act, map);
   mapCache = { act, nodes: map, version, emittedVersion: null };
   return { ...state, map, map_version: version };
 }
@@ -1048,6 +1107,22 @@ async function runSafetySelfTests() {
     throw new Error("Self-test failed: full map graph was not compacted correctly");
   }
 
+  if (resolveAct({
+    floor: 17,
+    screen_type: "MAP",
+    screen_state: { first_node_chosen: false, current_node: { y: -1 } },
+  }) !== 2 || resolveAct({ floor: 18, screen_type: "NONE" }) !== 2) {
+    throw new Error("Self-test failed: act transition was not inferred from the floor and start map");
+  }
+  if (resolveAct({ floor: 18 }, { act: 3 }) !== 3) {
+    throw new Error("Self-test failed: an explicit game act did not override floor inference");
+  }
+  const sameSizeMapA = [{ x: 0, y: 0, symbol: "M", children: [{ x: 1, y: 1 }] }];
+  const sameSizeMapB = [{ x: 0, y: 0, symbol: "M", children: [{ x: 2, y: 1 }] }];
+  if (mapVersion(2, sameSizeMapA) === mapVersion(2, sameSizeMapB)) {
+    throw new Error("Self-test failed: distinct same-size map topologies shared a version");
+  }
+
   const semanticHandDelta = diffValue(
     { hand: [{ n: "打击", c: 1 }, { n: "防御", c: 1 }] },
     { hand: [{ n: "防御", c: 1 }] },
@@ -1113,7 +1188,7 @@ async function runSafetySelfTests() {
 
   combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
   turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
-  process.stdout.write("Self-tests passed: safety guards, stable combat state, transient event and hand-selection reads, 1-based choices, map graph, semantic delta, and run changes\n");
+  process.stdout.write("Self-tests passed: safety guards, stable combat state, transient event and hand-selection reads, 1-based choices, act-aware map graph, semantic delta, and run changes\n");
 }
 
 function runSyntheticBenchmark() {

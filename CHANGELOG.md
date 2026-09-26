@@ -2,6 +2,17 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.4] - 2026-09-27
+
+### Fixed
+
+- Infer the current act from floor and act-start map state when MCP The Spire
+  omits `game.act`, preventing the next act from reusing a stale route graph.
+- Include a topology fingerprint in map versions so distinct maps with the
+  same node count cannot share a compact `map_ref`.
+- Add regression checks for the Act 1 to Act 2 transition and same-size map
+  version collisions.
+
 ## [0.2.3] - 2026-09-23
 
 ### Fixed
