@@ -2,6 +2,7 @@
 
 import readline from "node:readline";
 
+const pluginVersion = "0.2.6";
 const endpoint = process.env.STS_MCP_URL ?? "http://127.0.0.1:8080/mcp";
 const accept = "application/json, text/event-stream";
 const pollMs = Number(process.env.STS_POLL_MS ?? 180);
@@ -45,11 +46,16 @@ function inferActFromFloor(state) {
 }
 
 function resolveAct(state, game = {}) {
+  // MCP The Spire can keep reporting the previous act while the next act's
+  // start map is already visible.  The start-map floor/node combination is
+  // authoritative during that narrow transition window.
+  const inferred = inferActFromFloor(state);
+  if (isActStartMap(state) && inferred !== null) return inferred;
   return numericAct(game.act)
     ?? numericAct(game.act_num)
     ?? numericAct(game.act_number)
     ?? numericAct(state?.act)
-    ?? inferActFromFloor(state);
+    ?? inferred;
 }
 
 function syncMapCacheAct(act) {
@@ -122,7 +128,7 @@ async function initializeGame() {
     params: {
       protocolVersion: "2024-11-05",
       capabilities: {},
-      clientInfo: { name: "spire-copilot-proxy", version: "0.1.0" },
+      clientInfo: { name: "spire-copilot-proxy", version: pluginVersion },
     },
   });
   await post({ jsonrpc: "2.0", method: "notifications/initialized" });
@@ -473,6 +479,66 @@ function normalizeShopChooseArgs(state, args) {
   return normalized;
 }
 
+function choiceCards(state) {
+  if (state?.screen_type === "HAND_SELECT") {
+    if (Array.isArray(state?.screen_state?.hand)) return state.screen_state.hand;
+    if (Array.isArray(state.hand)) return state.hand;
+  }
+  return Array.isArray(state?.screen_state?.cards) ? state.screen_state.cards : [];
+}
+
+function resolveChoiceText(state, choiceText) {
+  const needle = choiceText.trim();
+  const choices = state?.choice_list ?? [];
+  const indexed = choices.map((choice, index) => ({ choice, index }));
+  const exact = indexed.filter(({ choice }) => choice === needle);
+  const matches = exact.length ? exact : indexed.filter(({ choice }) => choice.includes(needle));
+  if (matches.length !== 1) {
+    throw new Error(
+      `SAFETY choice_text '${needle}' matched ${matches.length} current choice(s). `
+      + `Current choices: [${choices.join(" | ")}]. Use a unique current choice_text or choice_uuid.`,
+    );
+  }
+  return matches[0].index + 1;
+}
+
+function resolveChoiceUuid(state, choiceUuid) {
+  const cards = choiceCards(state);
+  const matches = cards
+    .map((card, index) => ({ card, index }))
+    .filter(({ card }) => card?.uuid === choiceUuid);
+  if (matches.length !== 1) {
+    throw new Error(
+      `SAFETY choice_uuid '${choiceUuid}' matched ${matches.length} current card choice(s). `
+      + "Refresh state and use a uuid exposed on the current choice.",
+    );
+  }
+  return matches[0].index + 1;
+}
+
+function normalizeChooseArgs(state, args) {
+  if (isShopScreen(state)) return normalizeShopChooseArgs(state, args);
+  const normalized = { ...args };
+  if (typeof normalized.choice_uuid === "string" && normalized.choice_uuid.trim()) {
+    normalized.choice_index = resolveChoiceUuid(state, normalized.choice_uuid.trim());
+    delete normalized.choice_uuid;
+    delete normalized.choice_text;
+    return normalized;
+  }
+  if (typeof normalized.choice_text === "string" && normalized.choice_text.trim()) {
+    normalized.choice_index = resolveChoiceText(state, normalized.choice_text);
+    delete normalized.choice_text;
+    return normalized;
+  }
+  if (state?.screen_type === "HAND_SELECT") {
+    throw new Error(
+      "SAFETY hand-selection reindex: selectable cards are renumbered after each pick. "
+      + "Use choice_text for a unique card name or choice_uuid for an exact card instance.",
+    );
+  }
+  return normalized;
+}
+
 function monsterRosterKey(state) {
   return liveMonsters(state).map((monster) => `${monster.id ?? monster.name}:${monster.name}`).join("|");
 }
@@ -642,11 +708,14 @@ function compactState(state, { includeMap = true } = {}) {
   if (detail) {
     out.turn = detail.turn;
     if (detail.player?.block) out.block = detail.player.block;
+    if (detail.player?.stance) out.stance = detail.player.stance;
     if (detail.player?.powers?.length) {
       out.powers = detail.player.powers.map((power) => ({
         id: power.id,
-        ...(power.amount ? { n: power.amount } : {}),
-        ...(power.damage ? { d: power.damage } : {}),
+        ...(Number.isFinite(power.amount) && power.amount !== 0 ? { n: power.amount } : {}),
+        ...(Number.isFinite(power.damage) && power.damage !== 0 ? { d: power.damage } : {}),
+        ...(Number.isFinite(power.misc) && power.misc !== 0 ? { misc: power.misc } : {}),
+        ...(power.just_applied ? { just_applied: true } : {}),
       }));
     }
     out.piles = { draw: detail.draw_count, discard: detail.discard_count, exhaust: detail.exhaust_count };
@@ -666,7 +735,13 @@ function compactState(state, { includeMap = true } = {}) {
   }
   if (state.hand?.length) out.hand = state.hand.map(compactCard);
   if (state.choice_list?.length) {
-    out.choices = state.choice_list.map((text, index) => ({ i: index + 1, text }));
+    const cards = choiceCards(state);
+    out.choices = state.choice_list.map((text, index) => ({
+      i: index + 1,
+      text,
+      ...(cards[index]?.id ? { card_id: cards[index].id } : {}),
+      ...(cards[index]?.uuid ? { choice_uuid: cards[index].uuid } : {}),
+    }));
   }
   if (state.screen_state && Object.keys(state.screen_state).length) {
     out.details = compactScreenDetails(state);
@@ -770,6 +845,7 @@ function actionSummary(action, extra = {}) {
     ...(action.card_index ? { card_index: action.card_index } : {}),
     ...(action.target_index ? { target: action.target_index } : {}),
     ...(action.choice_text ? { choice: action.choice_text } : {}),
+    ...(action.choice_uuid ? { choice_uuid: action.choice_uuid } : {}),
     ...(!action.choice_text && action.choice_index ? { choice_index: action.choice_index } : {}),
     ...(action.potion_slot ? { potion_slot: action.potion_slot } : {}),
     ...extra,
@@ -824,28 +900,11 @@ async function validateToolCall(name, args) {
 }
 
 async function safeExecuteActions(actions, wait = true) {
-  await validateToolCall("execute_actions", { actions });
   let state = await decisionState();
   syncCombatSafety(state);
 
-  if (isShopScreen(state) && actions.some((action) => action?.action === "choose")) {
-    throw new Error(
-      "SAFETY shop reindex: batched shop choices are disabled because every purchase renumbers the remaining items. "
-      + "Send one choose call with choice_text, wait for refreshed state, then choose the next item by text.",
-    );
-  }
-
   const isCombatBatch = state.room_phase === "COMBAT" && actions.length > 0;
-  if (!isCombatBatch) {
-    const called = await rawTool("execute_actions", { actions });
-    if (!wait) return { ok: true, result: called.message };
-    await sleep(settleMs);
-    state = await decisionState();
-    syncCombatSafety(state);
-    return rememberAndCompact(state, false, { action: "act_many", completed: actions.length });
-  }
-
-  preflightCombatActions(state, actions);
+  if (isCombatBatch) preflightCombatActions(state, actions);
   const initialState = state;
   const normalizedActions = actions.map((action) => normalizeStableCardReference(action, initialState));
 
@@ -859,8 +918,11 @@ async function safeExecuteActions(actions, wait = true) {
       await sleep(Math.min(500, Math.max(0, Number(action.ms ?? 100))));
     } else {
       if (isPlayCardAction(action)) normalitySafetyCheck(state, [action]);
-      const toolCall = actionToolCall(action);
+      let toolCall = actionToolCall(action);
       if (toolCall) {
+        if (toolCall.name === "choose") {
+          toolCall = { ...toolCall, args: normalizeChooseArgs(state, toolCall.args) };
+        }
         if (toolCall.name === "end_turn") markEndTurnSent(state);
         await validateToolCall(toolCall.name, toolCall.args);
         try {
@@ -873,7 +935,7 @@ async function safeExecuteActions(actions, wait = true) {
         if (toolCall.name === "end_turn" && wait) {
           state = await waitForEndTurnSettlement({ floor: state.floor, turn: beforeTurn });
           settledByDedicatedWait = true;
-        } else if (toolCall.name === "choose" && state.screen_type === "HAND_SELECT" && wait) {
+        } else if (toolCall.name === "choose" && state.screen_type === "HAND_SELECT") {
           state = await waitForHandSelectionChoiceSettlement(state);
           settledByDedicatedWait = true;
         }
@@ -917,10 +979,11 @@ async function safeExecuteActions(actions, wait = true) {
 async function callAndSettle(name, args = {}, wait = true) {
   if (name === "execute_actions") return safeExecuteActions(args.actions ?? [], wait);
   let callArgs = { ...args };
+  const summaryArgs = { ...args };
   let callState;
   if (name === "choose") {
     callState = await decisionState();
-    callArgs = normalizeShopChooseArgs(callState, callArgs);
+    callArgs = normalizeChooseArgs(callState, callArgs);
   }
   if (name === "end_turn") {
     callState ??= await decisionState();
@@ -950,17 +1013,17 @@ async function callAndSettle(name, args = {}, wait = true) {
       turn: callState.combat_detail.turn,
     });
     syncCombatSafety(state);
-    return rememberAndCompact(state, false, actionSummary({ action: name, ...callArgs }));
+    return rememberAndCompact(state, false, actionSummary({ action: name, ...summaryArgs }));
   }
   if (name === "choose" && callState?.screen_type === "HAND_SELECT") {
     const state = await waitForHandSelectionChoiceSettlement(callState);
     syncCombatSafety(state);
-    return rememberAndCompact(state, false, actionSummary({ action: name, ...callArgs }));
+    return rememberAndCompact(state, false, actionSummary({ action: name, ...summaryArgs }));
   }
   await sleep(settleMs);
   const state = await decisionState();
   syncCombatSafety(state);
-  return rememberAndCompact(state, false, actionSummary({ action: name, ...callArgs }));
+  return rememberAndCompact(state, false, actionSummary({ action: name, ...summaryArgs }));
 }
 
 async function runSafetySelfTests() {
@@ -1023,6 +1086,50 @@ async function runSafetySelfTests() {
   expectThrow("Shop rejects ambiguous named choices", () => normalizeShopChooseArgs(
     { ...shopState, choice_list: ["add potion: [能量药水]", "add potion: [能量药水+]" ] },
     { choice_text: "能量药水" },
+  ));
+
+  const handChoiceState = {
+    screen_type: "HAND_SELECT",
+    choice_list: ["通晓万物+", "化体为空", "灼伤", "灼伤"],
+    hand: [
+      { id: "Omniscience", name: "通晓万物+", uuid: "omni-1" },
+      { id: "EmptyBody", name: "化体为空", uuid: "empty-1" },
+      { id: "Burn", name: "灼伤", uuid: "burn-1" },
+      { id: "Burn", name: "灼伤", uuid: "burn-2" },
+    ],
+    screen_state: {
+      hand: [
+        { id: "Omniscience", name: "通晓万物+", uuid: "omni-1" },
+        { id: "EmptyBody", name: "化体为空", uuid: "empty-1" },
+        { id: "Burn", name: "灼伤", uuid: "burn-1" },
+        { id: "Burn", name: "灼伤", uuid: "burn-2" },
+      ],
+    },
+  };
+  const resolvedHandText = normalizeChooseArgs(handChoiceState, { choice_text: "化体为空" });
+  if (resolvedHandText.choice_index !== 2 || "choice_text" in resolvedHandText) {
+    throw new Error("Self-test failed: named hand choice did not resolve against the latest indices");
+  }
+  const reindexedHandChoiceState = {
+    ...handChoiceState,
+    choice_list: handChoiceState.choice_list.slice(1),
+    hand: handChoiceState.hand.slice(1),
+    screen_state: { hand: handChoiceState.screen_state.hand.slice(1) },
+  };
+  if (normalizeChooseArgs(reindexedHandChoiceState, { choice_text: "化体为空" }).choice_index !== 1) {
+    throw new Error("Self-test failed: named hand choice reused its stale pre-selection index");
+  }
+  const resolvedHandUuid = normalizeChooseArgs(handChoiceState, { choice_uuid: "burn-2" });
+  if (resolvedHandUuid.choice_index !== 4 || "choice_uuid" in resolvedHandUuid) {
+    throw new Error("Self-test failed: UUID hand choice did not resolve an exact duplicate card");
+  }
+  expectThrow("Hand selection rejects stale numeric-only choices", () => normalizeChooseArgs(
+    handChoiceState,
+    { choice_index: 2 },
+  ));
+  expectThrow("Hand selection rejects ambiguous named choices", () => normalizeChooseArgs(
+    handChoiceState,
+    { choice_text: "灼伤" },
   ));
 
   const endTurnState = { floor: 9, room_phase: "COMBAT", combat_detail: { turn: 4 } };
@@ -1134,6 +1241,18 @@ async function runSafetySelfTests() {
     throw new Error("Self-test failed: full map graph was not compacted correctly");
   }
 
+  const compactHandChoices = compactState({
+    ready_for_command: true,
+    screen_type: "HAND_SELECT",
+    choice_list: handChoiceState.choice_list,
+    hand: handChoiceState.hand,
+    screen_state: handChoiceState.screen_state,
+  });
+  if (compactHandChoices.choices[1].choice_uuid !== "empty-1"
+      || compactHandChoices.choices[1].card_id !== "EmptyBody") {
+    throw new Error("Self-test failed: compact hand choices omitted stable card identities");
+  }
+
   if (resolveAct({
     floor: 17,
     screen_type: "MAP",
@@ -1144,10 +1263,42 @@ async function runSafetySelfTests() {
   if (resolveAct({ floor: 18 }, { act: 3 }) !== 3) {
     throw new Error("Self-test failed: an explicit game act did not override floor inference");
   }
+  if (resolveAct({
+    floor: 34,
+    screen_type: "MAP",
+    screen_state: { first_node_chosen: false, current_node: { y: -1 } },
+  }, { act: 2 }) !== 3) {
+    throw new Error("Self-test failed: stale downstream act overrode the next act's start map");
+  }
   const sameSizeMapA = [{ x: 0, y: 0, symbol: "M", children: [{ x: 1, y: 1 }] }];
   const sameSizeMapB = [{ x: 0, y: 0, symbol: "M", children: [{ x: 2, y: 1 }] }];
   if (mapVersion(2, sameSizeMapA) === mapVersion(2, sameSizeMapB)) {
     throw new Error("Self-test failed: distinct same-size map topologies shared a version");
+  }
+
+  const compactPlayerStatus = compactState({
+    ready_for_command: true,
+    screen_type: "NONE",
+    combat_detail: {
+      turn: 3,
+      player: {
+        stance: "Calm",
+        powers: [
+          { id: "Frail", amount: 2, just_applied: true },
+          { id: "Strength", amount: -1 },
+        ],
+      },
+      draw_count: 0,
+      discard_count: 0,
+      exhaust_count: 0,
+    },
+  });
+  if (compactPlayerStatus.stance !== "Calm"
+      || compactPlayerStatus.powers[0]?.id !== "Frail"
+      || compactPlayerStatus.powers[0]?.n !== 2
+      || compactPlayerStatus.powers[0]?.just_applied !== true
+      || compactPlayerStatus.powers[1]?.n !== -1) {
+    throw new Error("Self-test failed: compact player status dropped a stance or debuff field");
   }
 
   const semanticHandDelta = diffValue(
@@ -1305,6 +1456,7 @@ const ACTION_PROPERTIES = {
   target_index: { type: "integer", minimum: 1 },
   choice_index: { type: "integer", minimum: 1 },
   choice_text: { type: "string" },
+  choice_uuid: { type: "string" },
   potion_slot: { type: "integer", minimum: 1 },
 };
 
@@ -1321,7 +1473,7 @@ const PLUGIN_TOOLS = [
   },
   {
     name: "act",
-    description: "Perform one safe action and return an action receipt plus settled semantic changes. Shop purchases require choice_text. end_turn waits for the next turn and rejects duplicates.",
+    description: "Perform one safe action and return an action receipt plus settled semantic changes. Reindexing choice screens accept choice_text or choice_uuid; shops require choice_text. end_turn waits for the next turn and rejects duplicates.",
     inputSchema: {
       type: "object",
       properties: { ...ACTION_PROPERTIES, wait: { type: "boolean", default: true } },
@@ -1332,7 +1484,7 @@ const PLUGIN_TOOLS = [
   },
   {
     name: "act_many",
-    description: "Execute a short safe sequence serially and return settled semantic changes. Stops if the turn or enemy roster changes. Never batch shop purchases; send lethal targeted attacks separately.",
+    description: "Execute a short safe sequence serially and return settled semantic changes. Each choice_text or choice_uuid is re-resolved against fresh state; stops if the turn or enemy roster changes. Send lethal targeted attacks separately.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1410,8 +1562,8 @@ async function handleMcpMessage(message) {
       result: {
         protocolVersion: params.protocolVersion ?? "2024-11-05",
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "spire-copilot", version: "0.1.0" },
-        instructions: "Read get_state before acting. Use act for normal play and act_many only for short safe sequences. Shop purchases require choice_text. Never resend end_turn after timeout; read state instead.",
+        serverInfo: { name: "spire-copilot", version: pluginVersion },
+        instructions: "Read get_state before acting. Use act for normal play and act_many only for short safe sequences. Resolve changing card choices with choice_text or choice_uuid; shops require choice_text. Never resend end_turn after timeout; read state instead.",
       },
     };
   }

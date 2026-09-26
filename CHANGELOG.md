@@ -2,6 +2,29 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.6] - 2026-09-27
+
+### Added
+
+- Expose stable card IDs and UUIDs on live choice entries.
+- Include Watcher stance and preserve non-zero negative power amounts,
+  `misc`, and `just_applied` metadata in compact combat state.
+
+### Changed
+
+- Resolve `choice_text` and `choice_uuid` against a fresh state immediately
+  before sending the downstream numeric choice.
+- Reject numeric-only `HAND_SELECT` actions. Batched stable choices are executed
+  serially, with every `choice_text` or `choice_uuid` re-resolved after the
+  preceding selection settles.
+
+### Fixed
+
+- Prefer the inferred act on an act-start map when MCP The Spire still reports
+  the previous act, preventing a fresh map from receiving a stale `map_ref`.
+- Add regression coverage for reordered hand choices, duplicate card UUIDs,
+  stale act metadata, and compact player statuses.
+
 ## [0.2.5] - 2026-09-27
 
 ### Fixed

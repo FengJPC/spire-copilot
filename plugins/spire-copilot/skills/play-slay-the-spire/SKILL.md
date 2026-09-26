@@ -21,7 +21,9 @@ Use the `spire_copilot` MCP tools for live game state and actions.
 - Prefer `act` for individual decisions. Use `act_many` only for a short sequence whose targets and turn cannot change unexpectedly.
 - Action tools return a compact `result` receipt and settled `changes`; treat those changes as authoritative and call `get_state` only when the result is ambiguous or the user reports a mismatch.
 - Never resend `end_turn` after a timeout or uncertain response. Read state instead. The tool normally returns only after the next turn is ready.
+- On card-selection screens, use `choice_uuid` from the latest `choices` entry whenever duplicate names are possible; otherwise use a unique `choice_text`. Never reuse a numeric `choice_index` after another card has been selected because the remaining cards may be renumbered.
 - In shops, call `choose` with a unique `choice_text`; never use a remembered numeric item index.
+- `act_many` may contain `choose` actions only when each uses a stable `choice_text` or `choice_uuid`; the runtime resolves them serially against fresh state.
 - Send a known-lethal targeted attack separately, refresh state, and then target the remaining enemies.
 - While Normality is in hand, play no more than three cards that turn. Refresh after Normality leaves the hand.
 - Against Time Eater, read the `Time Warp` amount before every sequence. Make the twelfth card deliberate and ensure defense is already sufficient before it resolves.

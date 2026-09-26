@@ -8,14 +8,17 @@ Slay the Spire run. It adds a compact, safety-aware bridge in front of the
 
 - One-time run context plus semantic state deltas to reduce context usage.
 - Settled action responses that wait for animations and turn transitions.
-- Guards for Normality, duplicate end turns, changing enemy targets, and shop
-  item reindexing.
+- Guards for Normality, duplicate end turns, changing enemy targets, shop item
+  reindexing, and card-selection reindexing.
 - Consistent 1-based choice indices across state and action calls.
+- Stable `choice_text` / `choice_uuid` resolution for changing card lists.
 - A compact full route graph once per act, followed by a small map reference.
 - Automatic reporting of deck, relic, and potion changes such as newly acquired
   relics.
 - Filtering of transient combat frames with incomplete hands or `DEBUG`
   intents.
+- Compact Watcher stance and complete player-power metadata, including
+  negative amounts and newly applied statuses.
 - A Codex skill that explains pivotal decisions and pauses after each combat.
 
 ## Requirements
