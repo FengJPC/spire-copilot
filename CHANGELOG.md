@@ -2,6 +2,16 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.5] - 2026-09-27
+
+### Fixed
+
+- Ignore transient empty `COMBAT_REWARD` frames while enriched combat state
+  still contains live enemies. This prevents Scry and Meditate card-selection
+  grids from being reported as completed combats.
+- Add regression coverage that rejects the contradictory in-combat reward
+  frame while continuing to accept a real post-combat reward screen.
+
 ## [0.2.4] - 2026-09-27
 
 ### Fixed

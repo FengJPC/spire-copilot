@@ -252,6 +252,13 @@ async function enrichMap(state) {
 }
 
 function isStableDecisionState(state) {
+  // MCP The Spire can briefly expose an empty combat reward frame while a
+  // combat card-selection grid is opening or updating.  The enriched combat
+  // state is authoritative here: a reward screen cannot be real while live
+  // monsters from the current turn still exist.
+  if (state?.screen_type === "COMBAT_REWARD"
+      && Number.isFinite(state?.combat_detail?.turn)
+      && liveMonsters(state).length > 0) return false;
   if (state.room_phase !== "COMBAT") return true;
   if (!Number.isFinite(state.combat_detail?.turn)) return false;
   if (liveMonsters(state).some((monster) => !monster.intent || monster.intent === "DEBUG")) return false;
@@ -1035,6 +1042,26 @@ async function runSafetySelfTests() {
     throw new Error("Self-test failed: combat completion was not treated as settled");
   }
 
+  const liveCombatRewardFrame = {
+    ready_for_command: true,
+    room_phase: "COMPLETE",
+    screen_type: "COMBAT_REWARD",
+    screen_state: { rewards: [] },
+    combat_detail: { turn: 5 },
+    monsters: [{ id: "Collector", current_hp: 120, is_gone: false, intent: "ATTACK" }],
+  };
+  if (isStableDecisionState(liveCombatRewardFrame)) {
+    throw new Error("Self-test failed: transient combat reward with live monsters was treated as stable");
+  }
+  if (!isStableDecisionState({
+    ...liveCombatRewardFrame,
+    combat_detail: undefined,
+    monsters: [],
+    screen_state: { rewards: [{ reward_type: "GOLD", gold: 25 }] },
+  })) {
+    throw new Error("Self-test failed: completed combat reward was treated as transient");
+  }
+
   const handSelectStart = {
     ready_for_command: true,
     room_phase: "COMBAT",
@@ -1188,7 +1215,7 @@ async function runSafetySelfTests() {
 
   combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
   turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
-  process.stdout.write("Self-tests passed: safety guards, stable combat state, transient event and hand-selection reads, 1-based choices, act-aware map graph, semantic delta, and run changes\n");
+  process.stdout.write("Self-tests passed: safety guards, stable combat state, transient reward, event and hand-selection reads, 1-based choices, act-aware map graph, semantic delta, and run changes\n");
 }
 
 function runSyntheticBenchmark() {
