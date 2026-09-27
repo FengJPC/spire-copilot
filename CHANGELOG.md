@@ -2,6 +2,14 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.11] - 2026-09-27
+
+### Changed
+
+- Teach the gameplay skill that Thorns and similar retaliation trigger once
+  per damage hit, so multi-hit attacks must be evaluated per hit rather than
+  per card.
+
 ## [0.2.10] - 2026-09-27
 
 ### Fixed
