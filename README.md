@@ -74,6 +74,11 @@ Optional timing variables:
 - `STS_SETTLE_MS` (default `250`)
 - `STS_VISUAL_SETTLE_MS` (default `600`)
 - `STS_WAIT_TIMEOUT_MS` (default `20000`)
+- `STS_BATCH_TIMEOUT_MS` (default `45000`)
+
+`act` and `act_many` also accept a per-call `timeout_ms` override from
+1,000 to 120,000 milliseconds. This changes settlement waiting only; it never
+causes an uncertain action to be resent.
 
 Development checks:
 

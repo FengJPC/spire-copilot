@@ -2,13 +2,14 @@
 
 import readline from "node:readline";
 
-const pluginVersion = "0.2.12";
+const pluginVersion = "0.2.13";
 const endpoint = process.env.STS_MCP_URL ?? "http://127.0.0.1:8080/mcp";
 const accept = "application/json, text/event-stream";
 const pollMs = Number(process.env.STS_POLL_MS ?? 180);
 const settleMs = Number(process.env.STS_SETTLE_MS ?? 250);
 const visualSettleMs = Number(process.env.STS_VISUAL_SETTLE_MS ?? 600);
 const timeoutMs = Number(process.env.STS_WAIT_TIMEOUT_MS ?? 20000);
+const batchTimeoutMs = Number(process.env.STS_BATCH_TIMEOUT_MS ?? 45000);
 
 let sessionId;
 let requestId = 1;
@@ -20,6 +21,7 @@ let combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
 let turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
 let advisoryKeys = new Set();
 let mapCache = { act: null, nodes: null, version: null, emittedVersion: null };
+let lastStableDecisionState;
 let cardCatalog = {
   activeRun: false,
   rawById: new Map(),
@@ -76,7 +78,8 @@ function numericAct(value) {
 function isActStartMap(state) {
   return state?.screen_type === "MAP"
     && state?.screen_state?.first_node_chosen === false
-    && state?.screen_state?.current_node?.y === -1;
+    && (state?.screen_state?.current_node?.x === -1
+      || state?.screen_state?.current_node?.y === -1);
 }
 
 function inferActFromFloor(state) {
@@ -122,6 +125,14 @@ function mapVersion(act, map) {
   return `act-${act ?? "unknown"}-${map.length}-${mapTopologyHash(map)}`;
 }
 
+function mapMatchesVisibleNodes(state, map) {
+  const visible = state?.screen_state?.next_nodes ?? [];
+  if (!visible.length) return true;
+  return visible.every((visibleNode) => map.some((node) => (
+    node.x === visibleNode.x && node.y === visibleNode.y
+  )));
+}
+
 function parseRpcBody(body) {
   if (!body) return null;
   const trimmed = body.trim();
@@ -157,6 +168,7 @@ function resetGameConnection() {
   combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
   turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
   advisoryKeys = new Set();
+  lastStableDecisionState = undefined;
   resetMapCache();
   resetCardCatalog();
 }
@@ -445,6 +457,9 @@ async function enrichMap(state) {
   if (!Array.isArray(map)) return state;
   act = resolveAct(state, game) ?? act;
   syncMapCacheAct(act);
+  if (!mapMatchesVisibleNodes(state, map)) {
+    return { ...state, map_status: "pending_current_act" };
+  }
   const version = mapVersion(act, map);
   mapCache = { act, nodes: map, version, emittedVersion: null };
   return { ...state, map, map_version: version };
@@ -468,21 +483,44 @@ function isStableDecisionState(state) {
   return !openingFrameLooksIncomplete;
 }
 
-async function decisionState() {
+function carryForwardSameTurnIntents(state, previous = lastStableDecisionState) {
+  if (state?.room_phase !== "COMBAT" || previous?.room_phase !== "COMBAT") return state;
+  if (state.floor !== previous.floor
+      || state?.combat_detail?.turn !== previous?.combat_detail?.turn
+      || monsterRosterKey(state) !== monsterRosterKey(previous)) return state;
+  const previousMonsters = new Map(liveMonsters(previous).map((monster) => [
+    `${monster.id ?? monster.name}:${monster.name}`,
+    monster,
+  ]));
+  let changed = false;
+  const monsters = (state.monsters ?? []).map((monster) => {
+    if (monster.is_gone || (monster.intent && monster.intent !== "DEBUG")) return monster;
+    const key = `${monster.id ?? monster.name}:${monster.name}`;
+    const prior = previousMonsters.get(key);
+    if (!prior?.intent || prior.intent === "DEBUG") return monster;
+    changed = true;
+    return { ...monster, intent: prior.intent, move: monster.move ?? prior.move };
+  });
+  return changed ? { ...state, monsters } : state;
+}
+
+async function decisionState({ timeout = timeoutMs } = {}) {
   const started = Date.now();
   let state;
   do {
-    state = await waitUntilReady({ timeout: Math.max(1, timeoutMs - (Date.now() - started)) });
+    state = await waitUntilReady({ timeout: Math.max(1, timeout - (Date.now() - started)) });
     state = await enrichRunAndCombat(state);
+    state = carryForwardSameTurnIntents(state);
     if (isStableDecisionState(state)) break;
-    if (Date.now() - started >= timeoutMs) {
-      throw new Error(`Timed out after ${timeoutMs}ms waiting for a stable game state`);
+    if (Date.now() - started >= timeout) {
+      throw new Error(`Timed out after ${timeout}ms waiting for a stable game state`);
     }
     await sleep(pollMs);
   } while (true);
   state = await enrichMap(state);
   state = await enrichCardDefinitions(state);
   syncEndTurnSafety(state);
+  lastStableDecisionState = state;
   return state;
 }
 
@@ -631,7 +669,7 @@ async function waitForEndTurnSettlement(start, { timeout = timeoutMs } = {}) {
   let state;
   do {
     await sleep(pollMs);
-    state = await decisionState();
+    state = await decisionState({ timeout: Math.max(1, timeout - (Date.now() - started)) });
     if (endTurnHasSettled(start, state)) return state;
     if (Date.now() - started >= timeout) {
       throw new Error(
@@ -653,13 +691,16 @@ function handSelectionChoiceHasSettled(start, state) {
 
 async function waitForHandSelectionChoiceSettlement(
   start,
-  { timeout = timeoutMs, readState = decisionState, pause = sleep } = {},
+  { timeout = timeoutMs, readState, pause = sleep } = {},
 ) {
   const started = Date.now();
   let state;
   do {
     await pause(pollMs);
-    state = await readState();
+    const read = readState ?? (() => decisionState({
+      timeout: Math.max(1, timeout - (Date.now() - started)),
+    }));
+    state = await read();
     if (handSelectionChoiceHasSettled(start, state)) return state;
     if (Date.now() - started >= timeout) {
       throw new Error(
@@ -1100,6 +1141,7 @@ function compactState(state, { includeMap = true } = {}) {
     out.details = compactScreenDetails(state);
   }
   if (state.screen_type === "MAP" && state.map_version) out.map_ref = state.map_version;
+  if (state.screen_type === "MAP" && state.map_status) out.map_status = state.map_status;
   if (includeMap && state.screen_type === "MAP" && state.map?.length) out.map = state.map.map(compactMapNode);
   if (state.can_proceed) out.proceed = state.proceed_button ?? true;
   if (state.can_cancel) out.cancel = state.cancel_button ?? true;
@@ -1265,12 +1307,19 @@ function failedBatchReceipt(actions, index, error, downstreamAccepted, stateRefr
   };
 }
 
-async function settleFailedBatchAction({ state, actions, index, error, downstreamAccepted }) {
+async function settleFailedBatchAction({
+  state,
+  actions,
+  index,
+  error,
+  downstreamAccepted,
+  timeout = batchTimeoutMs,
+}) {
   let currentState = state;
   let stateRefreshError;
   try {
     await sleep(settleMs);
-    currentState = await decisionState();
+    currentState = await decisionState({ timeout });
     syncCombatSafety(currentState);
   } catch (refreshError) {
     stateRefreshError = refreshError;
@@ -1336,8 +1385,8 @@ async function validateToolCall(name, args) {
   }
 }
 
-async function safeExecuteActions(actions, wait = true) {
-  let state = await decisionState();
+async function safeExecuteActions(actions, wait = true, timeout = batchTimeoutMs) {
+  let state = await decisionState({ timeout });
   syncCombatSafety(state);
 
   const isCombatBatch = state.room_phase === "COMBAT" && actions.length > 0;
@@ -1370,10 +1419,13 @@ async function safeExecuteActions(actions, wait = true) {
           downstreamAccepted = true;
           if (toolCall.name === "play_card") combatSafety.cardsPlayed += 1;
           if (toolCall.name === "end_turn" && wait) {
-            state = await waitForEndTurnSettlement({ floor: state.floor, turn: beforeTurn });
+            state = await waitForEndTurnSettlement(
+              { floor: state.floor, turn: beforeTurn },
+              { timeout },
+            );
             settledByDedicatedWait = true;
           } else if (toolCall.name === "choose" && state.screen_type === "HAND_SELECT") {
-            state = await waitForHandSelectionChoiceSettlement(state);
+            state = await waitForHandSelectionChoiceSettlement(state, { timeout });
             settledByDedicatedWait = true;
           }
         } else {
@@ -1384,10 +1436,12 @@ async function safeExecuteActions(actions, wait = true) {
 
       if (!settledByDedicatedWait) {
         await sleep(settleMs);
-        state = await decisionState();
+        state = await decisionState({ timeout });
       }
       if (wait && action.action !== "wait") {
-        state = await waitForVisualSettlement(toolCall?.name ?? action.action, state);
+        state = await waitForVisualSettlement(toolCall?.name ?? action.action, state, {
+          readState: () => decisionState({ timeout }),
+        });
       }
       syncCombatSafety(state);
     } catch (error) {
@@ -1400,6 +1454,7 @@ async function safeExecuteActions(actions, wait = true) {
         index,
         error,
         downstreamAccepted,
+        timeout,
       });
     }
 
@@ -1429,22 +1484,22 @@ async function safeExecuteActions(actions, wait = true) {
   return rememberAndCompact(state, false, { action: "act_many", completed: normalizedActions.length });
 }
 
-async function callAndSettle(name, args = {}, wait = true) {
-  if (name === "execute_actions") return safeExecuteActions(args.actions ?? [], wait);
+async function callAndSettle(name, args = {}, wait = true, timeout = timeoutMs) {
+  if (name === "execute_actions") return safeExecuteActions(args.actions ?? [], wait, timeout);
   let callArgs = { ...args };
   const summaryArgs = { ...args };
   let callState;
   if (name === "choose") {
-    callState = await decisionState();
+    callState = await decisionState({ timeout });
     callArgs = normalizeChooseArgs(callState, callArgs);
   }
   if (name === "end_turn") {
-    callState ??= await decisionState();
+    callState ??= await decisionState({ timeout });
     markEndTurnSent(callState);
   }
   await validateToolCall(name, callArgs);
   if (name === "play_card") {
-    const state = await decisionState();
+    const state = await decisionState({ timeout });
     normalitySafetyCheck(state, [{ action: "play_card", ...callArgs }]);
   }
   let called;
@@ -1464,20 +1519,20 @@ async function callAndSettle(name, args = {}, wait = true) {
     let state = await waitForEndTurnSettlement({
       floor: callState.floor,
       turn: callState.combat_detail.turn,
-    });
-    state = await waitForVisualSettlement(name, state);
+    }, { timeout });
+    state = await waitForVisualSettlement(name, state, { readState: () => decisionState({ timeout }) });
     syncCombatSafety(state);
     return rememberAndCompact(state, false, actionSummary({ action: name, ...summaryArgs }));
   }
   if (name === "choose" && callState?.screen_type === "HAND_SELECT") {
-    let state = await waitForHandSelectionChoiceSettlement(callState);
-    state = await waitForVisualSettlement(name, state);
+    let state = await waitForHandSelectionChoiceSettlement(callState, { timeout });
+    state = await waitForVisualSettlement(name, state, { readState: () => decisionState({ timeout }) });
     syncCombatSafety(state);
     return rememberAndCompact(state, false, actionSummary({ action: name, ...summaryArgs }));
   }
   await sleep(settleMs);
-  let state = await decisionState();
-  state = await waitForVisualSettlement(name, state);
+  let state = await decisionState({ timeout });
+  state = await waitForVisualSettlement(name, state, { readState: () => decisionState({ timeout }) });
   syncCombatSafety(state);
   return rememberAndCompact(state, false, actionSummary({ action: name, ...summaryArgs }));
 }
@@ -1804,6 +1859,18 @@ async function runSafetySelfTests() {
   }, { act: 2 }) !== 3) {
     throw new Error("Self-test failed: stale downstream act overrode the next act's start map");
   }
+  if (resolveAct({
+    floor: 34,
+    screen_type: "MAP",
+    screen_state: { first_node_chosen: false, current_node: { x: -1, y: 15 } },
+  }, { act: 2 }) !== 3) {
+    throw new Error("Self-test failed: stale boss-row start-map coordinates hid the next act");
+  }
+  if (mapMatchesVisibleNodes({
+    screen_state: { next_nodes: [{ x: 0, y: 0 }, { x: 4, y: 0 }] },
+  }, [{ x: 0, y: 0 }, { x: 1, y: 0 }])) {
+    throw new Error("Self-test failed: a stale previous-act map matched incompatible visible entrances");
+  }
   const sameSizeMapA = [{ x: 0, y: 0, symbol: "M", children: [{ x: 1, y: 1 }] }];
   const sameSizeMapB = [{ x: 0, y: 0, symbol: "M", children: [{ x: 2, y: 1 }] }];
   if (mapVersion(2, sameSizeMapA) === mapVersion(2, sameSizeMapB)) {
@@ -1937,6 +2004,29 @@ async function runSafetySelfTests() {
     monsters: [{ name: "敌人", intent: "DEBUG", is_gone: false }],
   })) {
     throw new Error("Self-test failed: transient DEBUG combat state was treated as stable");
+  }
+  const knownIntentState = {
+    floor: 31,
+    room_phase: "COMBAT",
+    combat_detail: { turn: 2 },
+    monsters: [{ id: "Spiker", name: "钉刺机", current_hp: 40, intent: "ATTACK", move: { damage: 7 } }],
+  };
+  const repairedIntentState = carryForwardSameTurnIntents({
+    ...knownIntentState,
+    monsters: [{ id: "Spiker", name: "钉刺机", current_hp: 22, intent: "DEBUG" }],
+  }, knownIntentState);
+  if (repairedIntentState.monsters[0].intent !== "ATTACK"
+      || repairedIntentState.monsters[0].current_hp !== 22
+      || repairedIntentState.monsters[0].move?.damage !== 7) {
+    throw new Error("Self-test failed: same-turn DEBUG intent did not preserve fresh combat values");
+  }
+  const nextTurnIntentState = carryForwardSameTurnIntents({
+    ...knownIntentState,
+    combat_detail: { turn: 3 },
+    monsters: [{ id: "Spiker", name: "钉刺机", current_hp: 22, intent: "DEBUG" }],
+  }, knownIntentState);
+  if (nextTurnIntentState.monsters[0].intent !== "DEBUG") {
+    throw new Error("Self-test failed: an intent was carried across a turn boundary");
   }
 
   let screenReads = 0;
@@ -2177,6 +2267,12 @@ const ACTION_PROPERTIES = {
   potion_slot: { type: "integer", minimum: 1 },
 };
 
+const TIMEOUT_PROPERTY = {
+  type: "integer",
+  minimum: 1000,
+  maximum: 120000,
+};
+
 const PLUGIN_TOOLS = [
   {
     name: "get_state",
@@ -2208,7 +2304,11 @@ const PLUGIN_TOOLS = [
     description: "Perform one safe action and return an action receipt plus settled semantic changes. Reindexing choice screens accept choice_text or choice_uuid; shops require choice_text. end_turn waits for the next turn and rejects duplicates.",
     inputSchema: {
       type: "object",
-      properties: { ...ACTION_PROPERTIES, wait: { type: "boolean", default: true } },
+      properties: {
+        ...ACTION_PROPERTIES,
+        wait: { type: "boolean", default: true },
+        timeout_ms: TIMEOUT_PROPERTY,
+      },
       required: ["action"],
       additionalProperties: false,
     },
@@ -2231,6 +2331,7 @@ const PLUGIN_TOOLS = [
           },
         },
         wait: { type: "boolean", default: true },
+        timeout_ms: TIMEOUT_PROPERTY,
       },
       required: ["actions"],
       additionalProperties: false,
@@ -2371,13 +2472,18 @@ async function dispatchPluginTool(name, args = {}) {
   if (name === "get_state") return readPluginState(args.mode ?? "compact");
   if (name === "inspect_card") return inspectCard(args);
   if (name === "act") {
-    const { action, wait = true, ...actionArgs } = args;
+    const { action, wait = true, timeout_ms = timeoutMs, ...actionArgs } = args;
     const call = actionToolCall({ action, ...actionArgs });
     if (!call) throw new Error(`Unsupported action '${action}'`);
-    return callAndSettle(call.name, call.args, wait);
+    return callAndSettle(call.name, call.args, wait, timeout_ms);
   }
   if (name === "act_many") {
-    return callAndSettle("execute_actions", { actions: args.actions ?? [] }, args.wait !== false);
+    return callAndSettle(
+      "execute_actions",
+      { actions: args.actions ?? [] },
+      args.wait !== false,
+      args.timeout_ms ?? batchTimeoutMs,
+    );
   }
   throw new Error(`Unknown Spire Copilot tool '${name}'`);
 }

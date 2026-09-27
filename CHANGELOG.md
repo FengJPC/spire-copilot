@@ -2,6 +2,24 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.13] - 2026-09-27
+
+### Added
+
+- Allow `act` and `act_many` callers to override settlement with
+  `timeout_ms`; batched actions default to `STS_BATCH_TIMEOUT_MS` or 45 seconds.
+
+### Fixed
+
+- Recognize act-start maps whose stale boss-row sentinel is `x=-1` instead of
+  `y=-1`, and refuse to cache an upstream map whose nodes do not contain the
+  currently visible route choices.
+- Reuse the last confirmed enemy intent only within the same floor, turn, and
+  roster when MCP The Spire transiently reports `DEBUG`, while preserving the
+  newest HP, block, powers, hand, and relic counters. This prevents completed
+  multi-attack batches from timing out after Shuriken, Ornamental Fan, or
+  similar animation-heavy triggers.
+
 ## [0.2.12] - 2026-09-27
 
 ### Added

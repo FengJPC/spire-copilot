@@ -13,6 +13,10 @@ The plugin exposes four MCP tools:
   changes. If a later action fails, its normal result identifies completed,
   failed, and remaining actions together with the refreshed game state.
 
+Both action tools accept an optional `timeout_ms` settlement limit.
+`act_many` defaults to 45 seconds while single actions retain the 20-second
+default; accepted actions are never retried after an uncertain response.
+
 Choice screens expose consistent 1-based indices plus stable card identities.
 Use `choice_text` for unique names or `choice_uuid` for an exact card instance;
 hand selections reject stale numeric-only choices. Stable choices can be sent
