@@ -2,7 +2,7 @@
 
 import readline from "node:readline";
 
-const pluginVersion = "0.2.7";
+const pluginVersion = "0.2.8";
 const endpoint = process.env.STS_MCP_URL ?? "http://127.0.0.1:8080/mcp";
 const accept = "application/json, text/event-stream";
 const pollMs = Number(process.env.STS_POLL_MS ?? 180);
@@ -18,6 +18,14 @@ let gameInitialized = false;
 let combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
 let turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
 let mapCache = { act: null, nodes: null, version: null, emittedVersion: null };
+let cardCatalog = {
+  activeRun: false,
+  rawById: new Map(),
+  attemptedIds: new Set(),
+  definitions: new Map(),
+  emittedRefs: new Set(),
+  catalogPayloadSent: false,
+};
 
 const NORMALITY_IDS = new Set(["Normality"]);
 const NORMALITY_NAMES = new Set(["Normality", "凡庸"]);
@@ -26,6 +34,17 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function resetMapCache() {
   mapCache = { act: null, nodes: null, version: null, emittedVersion: null };
+}
+
+function resetCardCatalog() {
+  cardCatalog = {
+    activeRun: false,
+    rawById: new Map(),
+    attemptedIds: new Set(),
+    definitions: new Map(),
+    emittedRefs: new Set(),
+    catalogPayloadSent: false,
+  };
 }
 
 function numericAct(value) {
@@ -117,6 +136,7 @@ function resetGameConnection() {
   combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
   turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
   resetMapCache();
+  resetCardCatalog();
 }
 
 async function initializeGame() {
@@ -167,6 +187,150 @@ function parseState(message) {
   } catch {
     throw new Error(`State was not JSON: ${message}`);
   }
+}
+
+function cardUpgradeCount(card) {
+  return Number.isInteger(card?.upgrades) && card.upgrades > 0 ? card.upgrades : 0;
+}
+
+function cardRef(card) {
+  return card?.id ? `${card.id}@${cardUpgradeCount(card)}` : undefined;
+}
+
+function normalizeCardText(value) {
+  if (typeof value !== "string") return undefined;
+  return value.replace(/\s+NL\s+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function compactCardDefinition(raw, upgrades = 0) {
+  if (!raw?.id) return undefined;
+  const upgraded = upgrades > 0 && raw.upgraded ? raw.upgraded : {};
+  const variant = { ...raw, ...upgraded };
+  const text = normalizeCardText(variant.description);
+  const definition = {
+    id: raw.id,
+    n: variant.name ?? raw.name,
+    ...(raw.type ? { type: raw.type } : {}),
+    ...(raw.rarity ? { rarity: raw.rarity } : {}),
+    ...(Number.isFinite(variant.cost) ? { c: variant.cost } : {}),
+    ...(text ? { text } : {}),
+    ...(Number.isFinite(variant.base_damage) ? { d: variant.base_damage } : {}),
+    ...(Number.isFinite(variant.base_block) ? { b: variant.base_block } : {}),
+    ...(Number.isFinite(variant.base_magic_number) ? { m: variant.base_magic_number } : {}),
+    ...(upgrades ? { u: upgrades } : {}),
+    ...(variant.exhausts ? { x: true } : {}),
+    ...(variant.ethereal ? { ethereal: true } : {}),
+    ...(variant.retain ? { retain: true } : {}),
+    ...(variant.has_target ? { target: true } : {}),
+  };
+  return definition;
+}
+
+function collectCardInstances(state) {
+  const collected = [];
+  const add = (cards, zone) => {
+    for (const card of cards ?? []) {
+      if (card?.id) collected.push({ card, zone });
+    }
+  };
+  add(state?.screen_state?.cards, "choice");
+  if (state?.screen_type === "HAND_SELECT") add(state?.screen_state?.hand, "choice");
+  add(state?.hand, "hand");
+  add(state?.screen_state?.selected_cards, "selected");
+  add(state?.screen_state?.selected, "selected");
+  for (const instance of state?._card_catalog_instances ?? []) {
+    if (instance?.card?.id) collected.push(instance);
+  }
+  add(state?.run_detail?.deck, "deck");
+  const seen = new Set();
+  return collected.filter(({ card, zone }) => {
+    const key = card.uuid ?? `${zone}:${cardRef(card)}:${card.name}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function syncCardCatalogRun(state) {
+  if (!state?.in_game) {
+    cardCatalog.activeRun = false;
+    return;
+  }
+  if (!cardCatalog.activeRun) {
+    resetCardCatalog();
+    cardCatalog.activeRun = true;
+  }
+}
+
+async function requestCardInfo(cardIds) {
+  if (!cardIds.length) return [];
+  try {
+    const payload = parseState((await rawTool("get_card_info", { card_ids: cardIds })).message);
+    return Array.isArray(payload?.cards) ? payload.cards : [];
+  } catch (error) {
+    if (isConnectionError(error)) throw error;
+    if (cardIds.length === 1) return [];
+    const cards = [];
+    for (const cardId of cardIds) cards.push(...await requestCardInfo([cardId]));
+    return cards;
+  }
+}
+
+async function loadCardInfo(cardIds, { force = false } = {}) {
+  const pending = [...new Set(cardIds.filter(Boolean))]
+    .filter((cardId) => force || !cardCatalog.attemptedIds.has(cardId));
+  if (!pending.length) return;
+  for (const cardId of pending) cardCatalog.attemptedIds.add(cardId);
+  for (const card of await requestCardInfo(pending)) {
+    if (card?.id) cardCatalog.rawById.set(card.id, card);
+  }
+}
+
+function rememberCardDefinition(card) {
+  const ref = cardRef(card);
+  const raw = cardCatalog.rawById.get(card?.id);
+  if (!ref || !raw) return undefined;
+  const definition = compactCardDefinition(raw, cardUpgradeCount(card));
+  if (definition) cardCatalog.definitions.set(ref, definition);
+  return definition;
+}
+
+async function enrichCardDefinitions(state) {
+  syncCardCatalogRun(state);
+  if (!state?.in_game) return state;
+  const instances = collectCardInstances(state);
+  delete state._card_catalog_instances;
+  await loadCardInfo(instances.map(({ card }) => card.id));
+  for (const { card } of instances) rememberCardDefinition(card);
+  return state;
+}
+
+function pendingCardDefinitionPayload() {
+  const pending = [...cardCatalog.definitions.entries()]
+    .filter(([ref]) => !cardCatalog.emittedRefs.has(ref));
+  if (!pending.length) return {};
+  const field = cardCatalog.catalogPayloadSent ? "card_defs_added" : "card_defs";
+  for (const [ref] of pending) cardCatalog.emittedRefs.add(ref);
+  cardCatalog.catalogPayloadSent = true;
+  return { [field]: Object.fromEntries(pending) };
+}
+
+function compactCardInstance(card, zone = undefined) {
+  return {
+    ...(cardRef(card) ? { ref: cardRef(card) } : {}),
+    ...(card?.id ? { id: card.id } : {}),
+    ...(card?.name ? { n: card.name } : {}),
+    ...(card?.uuid ? { uuid: card.uuid } : {}),
+    ...(zone ? { zone } : {}),
+    ...(Number.isFinite(card?.cost) ? { c: card.cost } : {}),
+    ...(Number.isFinite(card?.damage) && card.damage >= 0 ? { d: card.damage } : {}),
+    ...(Number.isFinite(card?.block) && card.block >= 0 ? { b: card.block } : {}),
+    ...(Number.isFinite(card?.magic_number) && card.magic_number !== 0 ? { m: card.magic_number } : {}),
+    ...(cardUpgradeCount(card) ? { u: cardUpgradeCount(card) } : {}),
+    ...(card?.is_playable === false ? { playable: false } : {}),
+    ...(card?.exhausts ? { x: true } : {}),
+    ...(card?.has_target ? { target: true } : {}),
+  };
 }
 
 async function screenState() {
@@ -223,7 +387,7 @@ async function enrichRunAndCombat(state) {
   };
   const combat = game.combat_state;
   if (!combat) return next;
-  return {
+  const enriched = {
     ...next,
     hand: combat.hand ?? state.hand,
     monsters: combat.monsters ?? state.monsters,
@@ -237,6 +401,13 @@ async function enrichRunAndCombat(state) {
       cards_discarded_this_turn: combat.cards_discarded_this_turn ?? 0,
     },
   };
+  enriched._card_catalog_instances = [
+    ...(combat.draw_pile ?? []).map((card) => ({ card, zone: "draw" })),
+    ...(combat.discard_pile ?? []).map((card) => ({ card, zone: "discard" })),
+    ...(combat.exhaust_pile ?? []).map((card) => ({ card, zone: "exhaust" })),
+    ...(combat.limbo ?? []).map((card) => ({ card, zone: "limbo" })),
+  ];
+  return enriched;
 }
 
 async function enrichMap(state) {
@@ -288,6 +459,7 @@ async function decisionState() {
     await sleep(pollMs);
   } while (true);
   state = await enrichMap(state);
+  state = await enrichCardDefinitions(state);
   syncEndTurnSafety(state);
   return state;
 }
@@ -561,7 +733,7 @@ function actionToolCall(action) {
 }
 
 function compactCard(card) {
-  const value = { n: card.name, c: card.cost };
+  const value = { n: card.name, c: card.cost, ...(cardRef(card) ? { ref: cardRef(card) } : {}) };
   if (card.is_playable === false) value.p = false;
   if (Number.isFinite(card.damage) && card.damage >= 0) value.d = card.damage;
   if (Number.isFinite(card.block) && card.block >= 0) value.b = card.block;
@@ -570,6 +742,21 @@ function compactCard(card) {
   if (card.exhausts) value.x = true;
   if (card.has_target) value.t = true;
   return value;
+}
+
+function compactChoiceCard(card) {
+  if (!card) return {};
+  return {
+    ...(cardRef(card) ? { ref: cardRef(card) } : {}),
+    ...(Number.isFinite(card.cost) ? { c: card.cost } : {}),
+    ...(Number.isFinite(card.damage) && card.damage >= 0 ? { d: card.damage } : {}),
+    ...(Number.isFinite(card.block) && card.block >= 0 ? { b: card.block } : {}),
+    ...(Number.isFinite(card.magic_number) && card.magic_number !== 0 ? { m: card.magic_number } : {}),
+    ...(cardUpgradeCount(card) ? { u: cardUpgradeCount(card) } : {}),
+    ...(card.is_playable === false ? { p: false } : {}),
+    ...(card.exhausts ? { x: true } : {}),
+    ...(card.has_target ? { t: true } : {}),
+  };
 }
 
 function normalizeDisplayedChoiceIndices(value, key = "") {
@@ -645,12 +832,25 @@ function compactScreenDetails(state) {
     return {
       max_cards: details.max_cards,
       can_pick_zero: details.can_pick_zero,
-      selected: (details.selected ?? []).map((card) => ({ id: card.id, n: card.name })),
+      selected: (details.selected ?? details.selected_cards ?? []).map((card) => compactCardInstance(card)),
+    };
+  }
+  if (state.screen_type === "GRID") {
+    return {
+      num_cards: details.num_cards,
+      any_number: details.any_number,
+      confirm_up: details.confirm_up,
+      for_upgrade: details.for_upgrade,
+      for_transform: details.for_transform,
+      for_purge: details.for_purge,
+      selected: (details.selected_cards ?? details.selected ?? []).map((card) => compactCardInstance(card)),
     };
   }
   if (state.screen_type === "CARD_REWARD") {
+    const cards = details.cards ?? [];
+    const choicesCoverCards = cards.length > 0 && state.choice_list?.length === cards.length;
     return {
-      cards: (details.cards ?? []).map(compactScreenCard),
+      ...(!choicesCoverCards ? { cards: cards.map(compactScreenCard) } : {}),
       bowl_available: details.bowl_available,
       skip_available: details.skip_available,
     };
@@ -741,6 +941,7 @@ function compactState(state, { includeMap = true } = {}) {
       text,
       ...(cards[index]?.id ? { card_id: cards[index].id } : {}),
       ...(cards[index]?.uuid ? { choice_uuid: cards[index].uuid } : {}),
+      ...compactChoiceCard(cards[index]),
     }));
   }
   if (state.screen_state && Object.keys(state.screen_state).length) {
@@ -894,11 +1095,14 @@ function rememberAndCompact(state, deltaOnly = false, actionResult = undefined) 
   const change = previousState ? diffValue(previousState, compact) : compact;
   const runContext = compactRunContext(state);
   const runPayload = runContext ? compactRunDelta(previousRunContext, runContext) : {};
+  const definitionPayload = pendingCardDefinitionPayload();
   previousState = compact;
   if (runContext) previousRunContext = runContext;
   if (includeMap) mapCache.emittedVersion = state.map_version;
-  if (actionResult) return { result: actionResult, changes: change ?? {}, ...runPayload };
-  return deltaOnly ? { delta: change ?? {}, ...runPayload } : { ...compact, ...runPayload };
+  if (actionResult) return { result: actionResult, changes: change ?? {}, ...runPayload, ...definitionPayload };
+  return deltaOnly
+    ? { delta: change ?? {}, ...runPayload, ...definitionPayload }
+    : { ...compact, ...runPayload, ...definitionPayload };
 }
 
 async function listTools() {
@@ -1302,6 +1506,64 @@ async function runSafetySelfTests() {
     throw new Error("Self-test failed: compact hand choices omitted stable card identities");
   }
 
+  const compactGrid = compactState({
+    ready_for_command: true,
+    screen_type: "GRID",
+    choice_list: ["化体为空+", "时之沙"],
+    screen_state: {
+      cards: [
+        { id: "EmptyBody", name: "化体为空+", uuid: "empty-up", upgrades: 1, cost: 1, block: 10 },
+        { id: "SandsOfTime", name: "时之沙", uuid: "sands", cost: 0, damage: 20, has_target: true },
+      ],
+      selected_cards: [],
+      num_cards: 2,
+      any_number: false,
+      confirm_up: false,
+    },
+  });
+  if (compactGrid.details.cards
+      || compactGrid.details.num_cards !== 2
+      || compactGrid.choices[0].ref !== "EmptyBody@1"
+      || compactGrid.choices[0].b !== 10
+      || compactGrid.choices[1].choice_uuid !== "sands") {
+    throw new Error("Self-test failed: GRID choices were not compacted without losing stable or dynamic card data");
+  }
+
+  const upgradedDefinition = compactCardDefinition({
+    id: "EmptyBody",
+    name: "化体为空",
+    type: "SKILL",
+    rarity: "COMMON",
+    cost: 1,
+    base_block: 7,
+    description: "获得 !B! 点 格挡 。 NL 退出当前 姿态 。",
+    upgraded: { name: "化体为空+", base_block: 10 },
+  }, 1);
+  if (upgradedDefinition.n !== "化体为空+"
+      || upgradedDefinition.b !== 10
+      || upgradedDefinition.u !== 1
+      || upgradedDefinition.text.includes("NL")) {
+    throw new Error("Self-test failed: upgraded card definition was not normalized correctly");
+  }
+
+  resetCardCatalog();
+  cardCatalog.definitions.set("EmptyBody@1", upgradedDefinition);
+  const initialDefinitionPayload = pendingCardDefinitionPayload();
+  if (!initialDefinitionPayload.card_defs?.["EmptyBody@1"]
+      || Object.keys(pendingCardDefinitionPayload()).length !== 0) {
+    throw new Error("Self-test failed: initial card definitions were not emitted exactly once");
+  }
+  cardCatalog.definitions.set("Insight@0", { id: "Insight", n: "洞见", text: "抽2张牌。" });
+  if (!pendingCardDefinitionPayload().card_defs_added?.["Insight@0"]) {
+    throw new Error("Self-test failed: a newly discovered card definition was not emitted incrementally");
+  }
+  expectThrow("Card inspection requires one selector", () => validateCardInspectionArgs({}));
+  expectThrow("Card inspection rejects ambiguous selectors", () => validateCardInspectionArgs({
+    card_id: "EmptyBody",
+    card_name: "化体为空",
+  }));
+  resetCardCatalog();
+
   if (resolveAct({
     floor: 17,
     screen_type: "MAP",
@@ -1472,6 +1734,44 @@ function runSyntheticBenchmark() {
   const repeatedCompact = bytes(before) + bytes(after);
   const deltaBytes = bytes({ delta: diffValue(before, after) });
   const initialPlusDelta = bytes(before) + deltaBytes;
+  const gridCards = Array.from({ length: 20 }, (_, index) => ({
+    id: `Card${index}`,
+    name: `选择牌${index}`,
+    uuid: `00000000-0000-0000-0000-${String(index).padStart(12, "0")}`,
+    type: index % 2 ? "SKILL" : "ATTACK",
+    cost: index % 3,
+    damage: index % 2 ? undefined : 8 + index,
+    block: index % 2 ? 6 + index : undefined,
+    magic_number: 2,
+    upgrades: index % 4 === 0 ? 1 : 0,
+    is_playable: true,
+    has_target: index % 2 === 0,
+  }));
+  const legacyGridPayload = {
+    choices: gridCards.map((card, index) => ({
+      i: index + 1,
+      text: card.name,
+      card_id: card.id,
+      choice_uuid: card.uuid,
+    })),
+    details: {
+      cards: gridCards,
+      selected_cards: [],
+      num_cards: 2,
+      any_number: false,
+      confirm_up: false,
+      for_upgrade: false,
+      for_transform: false,
+      for_purge: false,
+    },
+  };
+  const compactGridState = compactState({
+    ready_for_command: true,
+    screen_type: "GRID",
+    choice_list: gridCards.map((card) => card.name),
+    screen_state: legacyGridPayload.details,
+  });
+  const compactGridPayload = { choices: compactGridState.choices, details: compactGridState.details };
   process.stdout.write(`${JSON.stringify({
     fixture: "single-combat-decision",
     repeated_state_bytes_per_followup: bytes(after),
@@ -1480,6 +1780,9 @@ function runSyntheticBenchmark() {
     repeated_compact_bytes: repeatedCompact,
     initial_plus_semantic_delta_bytes: initialPlusDelta,
     reduction_percent: Number(((1 - initialPlusDelta / repeatedCompact) * 100).toFixed(1)),
+    grid_20_card_legacy_bytes: bytes(legacyGridPayload),
+    grid_20_card_compact_bytes: bytes(compactGridPayload),
+    grid_20_card_reduction_percent: Number(((1 - bytes(compactGridPayload) / bytes(legacyGridPayload)) * 100).toFixed(1)),
     note: "Synthetic regression fixture; not a published real-run token claim",
   }, null, 2)}\n`);
 }
@@ -1548,6 +1851,21 @@ const PLUGIN_TOOLS = [
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
   {
+    name: "inspect_card",
+    description: "Query one card definition without expanding the whole game state. Prefer choice_uuid for an exact live card; use card_id plus optional upgrades for arbitrary known cards; card_name only when unique. Successful queries join the per-run card-definition cache.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        choice_uuid: { type: "string" },
+        card_id: { type: "string" },
+        card_name: { type: "string" },
+        upgrades: { type: "integer", minimum: 0 },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
     name: "act",
     description: "Perform one safe action and return an action receipt plus settled semantic changes. Reindexing choice screens accept choice_text or choice_uuid; shops require choice_text. end_turn waits for the next turn and rejects duplicates.",
     inputSchema: {
@@ -1600,6 +1918,102 @@ function isConnectionError(error) {
   return /fetch failed|ECONNREFUSED|ECONNRESET|socket|HTTP 404|HTTP 410|HTTP 5\d\d/i.test(message);
 }
 
+function validateCardInspectionArgs(args) {
+  const selectors = ["choice_uuid", "card_id", "card_name"]
+    .filter((key) => typeof args?.[key] === "string" && args[key].trim());
+  if (selectors.length !== 1) {
+    throw new Error("inspect_card requires exactly one of choice_uuid, card_id, or card_name");
+  }
+  if (args.upgrades !== undefined && (!Number.isInteger(args.upgrades) || args.upgrades < 0)) {
+    throw new Error("inspect_card.upgrades must be a non-negative integer");
+  }
+  if (args.choice_uuid && args.upgrades !== undefined) {
+    throw new Error("inspect_card.upgrades cannot be combined with choice_uuid");
+  }
+  return selectors[0];
+}
+
+function uniqueCardRefs(instances) {
+  return [...new Set(instances.map(({ card }) => cardRef(card)).filter(Boolean))];
+}
+
+function preferredCardInstance(instances) {
+  const priority = new Map([["choice", 0], ["hand", 1], ["selected", 2], ["deck", 3]]);
+  return [...instances].sort((a, b) => (priority.get(a.zone) ?? 9) - (priority.get(b.zone) ?? 9))[0];
+}
+
+async function inspectCard(args = {}) {
+  const selector = validateCardInspectionArgs(args);
+  const state = await decisionState();
+  let instances = collectCardInstances(state);
+  let ref;
+
+  if (selector === "choice_uuid") {
+    instances = instances.filter(({ card }) => card.uuid === args.choice_uuid.trim());
+    if (instances.length !== 1) {
+      throw new Error(
+        `inspect_card choice_uuid '${args.choice_uuid}' matched ${instances.length} live card instance(s); refresh state`,
+      );
+    }
+    ref = cardRef(instances[0].card);
+  } else if (selector === "card_id") {
+    const cardId = args.card_id.trim();
+    instances = instances.filter(({ card }) => card.id === cardId
+      && (args.upgrades === undefined || cardUpgradeCount(card) === args.upgrades));
+    const refs = uniqueCardRefs(instances);
+    if (refs.length > 1) {
+      throw new Error(`inspect_card card_id '${cardId}' matched multiple upgrade levels; specify upgrades`);
+    }
+    ref = refs[0] ?? `${cardId}@${args.upgrades ?? 0}`;
+    await loadCardInfo([cardId], { force: !cardCatalog.rawById.has(cardId) });
+    if (!cardCatalog.definitions.has(ref)) {
+      rememberCardDefinition({ id: cardId, upgrades: args.upgrades ?? 0 });
+    }
+  } else {
+    const name = args.card_name.trim();
+    instances = instances.filter(({ card }) => card.name === name
+      && (args.upgrades === undefined || cardUpgradeCount(card) === args.upgrades));
+    const cachedRefs = [...cardCatalog.definitions.entries()]
+      .filter(([, definition]) => definition.n === name
+        && (args.upgrades === undefined || (definition.u ?? 0) === args.upgrades))
+      .map(([cachedRef]) => cachedRef);
+    const refs = [...new Set([...uniqueCardRefs(instances), ...cachedRefs])];
+    if (refs.length !== 1) {
+      throw new Error(
+        `inspect_card card_name '${name}' matched ${refs.length} definition(s); use card_id or choice_uuid`,
+      );
+    }
+    [ref] = refs;
+  }
+
+  const definition = cardCatalog.definitions.get(ref);
+  if (!definition) {
+    return {
+      status: "DEFINITION_UNAVAILABLE",
+      ref,
+      source: instances.length ? "live_instance" : "not_found",
+      ...(instances.length ? {
+        instances: instances.map(({ card, zone }) => compactCardInstance(card, zone)),
+      } : {}),
+    };
+  }
+
+  cardCatalog.emittedRefs.add(ref);
+  const matchingInstances = instances.filter(({ card }) => cardRef(card) === ref);
+  const preferred = preferredCardInstance(matchingInstances);
+  return {
+    status: "ok",
+    ref,
+    source: matchingInstances.length ? "live_instance" : "downstream_definition",
+    definition,
+    ...(selector === "choice_uuid" && preferred
+      ? { instance: compactCardInstance(preferred.card, preferred.zone) }
+      : matchingInstances.length
+        ? { instances: matchingInstances.map(({ card, zone }) => compactCardInstance(card, zone)) }
+        : {}),
+  };
+}
+
 async function readPluginState(mode) {
   const read = async () => {
     const state = await decisionState();
@@ -1617,6 +2031,7 @@ async function readPluginState(mode) {
 
 async function dispatchPluginTool(name, args = {}) {
   if (name === "get_state") return readPluginState(args.mode ?? "compact");
+  if (name === "inspect_card") return inspectCard(args);
   if (name === "act") {
     const { action, wait = true, ...actionArgs } = args;
     const call = actionToolCall({ action, ...actionArgs });
@@ -1639,7 +2054,7 @@ async function handleMcpMessage(message) {
         protocolVersion: params.protocolVersion ?? "2024-11-05",
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: "spire-copilot", version: pluginVersion },
-        instructions: "Read get_state before acting. Use act for normal play and act_many only for short safe sequences. Resolve changing card choices with choice_text or choice_uuid; shops require choice_text. Never resend end_turn after timeout; read state instead.",
+        instructions: "Read get_state before acting. Card definitions are sent once and later states use refs; use inspect_card to verify one effect without requesting full state. Use act for normal play and act_many only for short safe sequences. Resolve changing card choices with choice_text or choice_uuid; shops require choice_text. Never resend end_turn after timeout; read state instead.",
       },
     };
   }

@@ -15,6 +15,8 @@ Use the `spire_copilot` MCP tools for live game state and actions.
 4. All game indices are 1-based.
 5. The first compact state includes `run_context`; later deck, relic, and potion updates arrive in `run_delta`.
 6. The first map state in an act includes the full route graph in `map`; later map states use `map_ref` plus current/next nodes. Each map node uses `s` for its room symbol and `to` for child coordinates.
+7. The first compact state includes cached effects in `card_defs`; definitions for newly seen generated, rewarded, or Mod cards arrive in `card_defs_added`. Choice and hand entries use `ref` plus their current values.
+8. Use `inspect_card` when a card effect is missing, unfamiliar, modified, or worth verifying. Prefer `choice_uuid` for an exact live instance, otherwise use `card_id` with `upgrades`; do not request full state only to inspect one card.
 
 ## Acting safely
 
@@ -42,4 +44,5 @@ Use the `spire_copilot` MCP tools for live game state and actions.
 
 - Use compact state at the start of a task. Afterwards rely on action `changes`, and use delta only when the previous state is still reliable.
 - Use full state only for diagnostics.
+- Treat `card_defs` as the static baseline and live hand/choice values as authoritative for current cost, damage, block, and playability.
 - Do not request or repeat the complete deck, relic list, or full map after their initial context unless diagnosing a mismatch.

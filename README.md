@@ -7,6 +7,10 @@ Slay the Spire run. It adds a compact, safety-aware bridge in front of the
 ## What it adds
 
 - One-time run context plus semantic state deltas to reduce context usage.
+- One-time card-effect definitions with incremental definitions for newly seen
+  cards, plus an `inspect_card` lookup for targeted verification.
+- Screen-aware GRID compaction that keeps stable identities and live values
+  without repeating every full card object.
 - Settled action responses that wait for animations and turn transitions.
 - Guards for Normality, duplicate end turns, changing enemy targets, shop item
   reindexing, and card-selection reindexing.

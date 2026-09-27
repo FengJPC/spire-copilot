@@ -2,6 +2,23 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.8] - 2026-09-27
+
+### Added
+
+- Cache localized card definitions from MCP The Spire's native
+  `get_card_info` endpoint. The first compact state emits `card_defs`; newly
+  encountered generated, rewarded, or Mod cards emit `card_defs_added` once.
+- Add `inspect_card` for targeted lookup by live UUID, internal card ID and
+  upgrade level, or an unambiguous live/cached name.
+
+### Changed
+
+- Compact GRID screens into stable choice refs, live card values, and selection
+  rules instead of repeating the complete card array in both `choices` and
+  `details`.
+- Extend the synthetic benchmark with a 20-card GRID fixture.
+
 ## [0.2.7] - 2026-09-27
 
 ### Fixed
