@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "spire-copilot",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "description": "A compact, safety-aware MCP copilot for playing modded Slay the Spire.",
   "author": {
     "name": "FengJ",
@@ -21,7 +21,7 @@
       "interface": {
         "displayName": "Spire Copilot",
         "shortDescription": "Play Slay the Spire through a safer, compact MCP bridge.",
-        "longDescription": "Connects Codex to MCP The Spire through one-time run and card-effect context, compact hand-stat deltas, target-adjusted damage estimates, animation-aware action pacing, stable turn transitions, and safety guards for Normality, changing targets, duplicate end turns, and dynamic choice reindexing.",
+        "longDescription": "Connects Codex to MCP The Spire through one-time run and card-effect context, compact hand-stat deltas, target-adjusted damage estimates, one-shot contextual advisories, animation-aware action pacing, stable turn transitions, and safety guards for Normality, changing targets, duplicate end turns, and dynamic choice reindexing.",
         "developerName": "FengJ",
         "category": "Games",
         "capabilities": [

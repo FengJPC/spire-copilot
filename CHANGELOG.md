@@ -2,6 +2,21 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.12] - 2026-09-27
+
+### Added
+
+- Emit concise, deduplicated contextual advisories when relevant combat
+  mechanics, supported bosses, Wrath risk, Normality, or Coffee Dripper at a
+  Rest site first appear.
+- Add conditional references for compact-state recovery and uncommon combat
+  safety details.
+
+### Changed
+
+- Reduce the always-loaded gameplay skill while preserving its full guidance
+  through runtime advisories and progressively disclosed references.
+
 ## [0.2.11] - 2026-09-27
 
 ### Changed

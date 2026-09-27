@@ -2,7 +2,7 @@
 
 import readline from "node:readline";
 
-const pluginVersion = "0.2.10";
+const pluginVersion = "0.2.12";
 const endpoint = process.env.STS_MCP_URL ?? "http://127.0.0.1:8080/mcp";
 const accept = "application/json, text/event-stream";
 const pollMs = Number(process.env.STS_POLL_MS ?? 180);
@@ -18,6 +18,7 @@ let previousRunContext;
 let gameInitialized = false;
 let combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
 let turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
+let advisoryKeys = new Set();
 let mapCache = { act: null, nodes: null, version: null, emittedVersion: null };
 let cardCatalog = {
   activeRun: false,
@@ -155,6 +156,7 @@ function resetGameConnection() {
   gameInitialized = false;
   combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
   turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
+  advisoryKeys = new Set();
   resetMapCache();
   resetCardCatalog();
 }
@@ -486,6 +488,100 @@ async function decisionState() {
 
 function liveMonsters(state) {
   return (state?.monsters ?? []).filter((monster) => !monster.is_gone);
+}
+
+function identityKey(value) {
+  return String(value ?? "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function entityMatches(entity, identities) {
+  const values = [entity?.id, entity?.name].map(identityKey).filter(Boolean);
+  const expected = identities.map(identityKey);
+  return values.some((value) => expected.includes(value));
+}
+
+function entityHasPower(entity, identities) {
+  return (entity?.powers ?? []).some((power) => entityMatches(power, identities));
+}
+
+function stateHasRelic(state, identities) {
+  return (state?.run_detail?.relics ?? []).some((relic) => entityMatches(relic, identities));
+}
+
+function collectContextAdvisories(state) {
+  const advisories = [];
+  const floor = Number.isFinite(state?.floor) ? state.floor : "unknown";
+  const turn = Number.isFinite(state?.combat_detail?.turn) ? state.combat_detail.turn : "unknown";
+  const add = (scope, id, text) => {
+    const key = `${floor}:${scope}:${id}`;
+    if (advisoryKeys.has(key)) return;
+    advisoryKeys.add(key);
+    advisories.push({ id, text });
+  };
+
+  if (state?.screen_type === "REST" && stateHasRelic(state, ["Coffee Dripper", "咖啡滤杯"])) {
+    add("rest", "coffee-dripper", "Coffee Dripper prevents healing at Rest sites; treat this campfire as an upgrade or other non-healing action.");
+  }
+
+  if (state?.room_phase !== "COMBAT" || !Number.isFinite(state?.combat_detail?.turn)) {
+    return advisories;
+  }
+
+  const enemies = liveMonsters(state);
+  const enemyMatches = (identities) => enemies.some((enemy) => entityMatches(enemy, identities));
+  const enemyHasPower = (identities) => enemies.some((enemy) => entityHasPower(enemy, identities));
+  const thorns = enemies.flatMap((enemy) => (enemy.powers ?? [])
+    .filter((power) => entityMatches(power, ["Thorns", "Sharp Hide", "尖刺", "锋利外壳"]))
+    .map((power) => Number(power.amount) || 0));
+
+  if (thorns.length) {
+    const amount = Math.max(...thorns);
+    add("combat", "per-hit-retaliation", `On-hit retaliation${amount > 0 ? ` (${amount})` : ""} triggers once per damage hit, so multi-hit attacks repeat it; prefer single large hits at low HP and establish block first.`);
+  }
+  if (hasNormality(state)) {
+    add(`turn-${turn}`, "normality", "Normality is in hand: no more than three cards may be played this turn. Remove or exhaust it, then refresh before continuing.");
+  }
+  if (state?.combat_detail?.player?.stance === "Wrath"
+      && enemies.some((enemy) => enemy.intent === "ATTACK" || Number(enemy.move?.damage) > 0)) {
+    add(`turn-${turn}`, "wrath-incoming", "Wrath is active while an enemy intends to attack; confirm lethal or exit Wrath and cover the displayed incoming damage before ending the turn.");
+  }
+
+  if (enemyMatches(["Time Eater", "TimeEater", "时间吞噬者"]) || enemyHasPower(["Time Warp", "TimeWarp"])) {
+    add("combat", "time-eater", "Time Eater ends the turn after the twelfth card and gains Strength. Read Time Warp before every sequence and make the twelfth card deliberate with defense already established.");
+  }
+  if (enemyMatches(["Awakened One", "AwakenedOne", "觉醒者"]) || enemyHasPower(["Curiosity", "好奇"])) {
+    add("combat", "awakened-one", "Awakened One gains Strength from Powers in phase one and revives into phase two. Delay nonessential Powers, clear Cultists deliberately, and plan beyond the first lethal.");
+  }
+  if (enemyMatches(["Corrupt Heart", "CorruptHeart", "腐化之心"])
+      || enemyHasPower(["Beat of Death", "BeatOfDeath", "Invincible", "无敌"])) {
+    add("combat", "corrupt-heart", "Corrupt Heart punishes each card with Beat of Death and caps turn damage with Invincible. Establish block before long chains and do not spend attacks beyond the remaining cap.");
+  }
+  if (enemyMatches(["Slime Boss", "SlimeBoss", "史莱姆老大"])) {
+    add("combat", "slime-boss", "Slime Boss splits after being reduced to half HP or lower. Send a split-triggering attack separately because the enemy roster and target indices will change.");
+  }
+  if (enemyMatches(["The Guardian", "TheGuardian", "守护者"])) {
+    add("combat", "the-guardian", "The Guardian changes form at its Mode Shift threshold and can gain Sharp Hide. Track the threshold and treat Sharp Hide as per-hit retaliation before multi-hit attacks.");
+  }
+  if (enemyMatches(["Hexaghost", "六火亡魂"])) {
+    add("combat", "hexaghost", "Hexaghost's opening Divider scales with current HP; Burns accumulate toward its later Inferno. Prioritize scalable defense and a timely kill rather than healing assumptions.");
+  }
+  if (enemyMatches(["Bronze Automaton", "BronzeAutomaton", "青铜自动机"])) {
+    add("combat", "bronze-automaton", "Bronze Automaton's Orbs can steal cards and Hyper Beam is its major burst. Plan the defensive turn and refresh targets after killing an Orb.");
+  }
+  if (enemyMatches(["The Champ", "Champ", "勇士"])) {
+    add("combat", "the-champ", "The Champ cleanses debuffs and changes behavior below half HP before Execute. Do not cross the threshold without enough burst or defense for the transition.");
+  }
+  if (enemyMatches(["The Collector", "Collector", "收藏家"])) {
+    add("combat", "the-collector", "The Collector can summon minions and apply Vulnerable, Weak, and Frail before a large attack. Preserve mitigation and refresh target indices after summons or deaths.");
+  }
+  if (enemyMatches(["Donu", "甜圈"]) || enemyMatches(["Deca", "八体"])) {
+    add("combat", "donu-and-deca", "Donu adds Strength while Deca adds defense and Dazed cards. Choose a focus target instead of splitting damage, then refresh indices after the first kill.");
+  }
+
+  return advisories;
 }
 
 function syncCombatSafety(state) {
@@ -1193,13 +1289,17 @@ function rememberAndCompact(state, deltaOnly = false, actionResult = undefined) 
   const runContext = compactRunContext(state);
   const runPayload = runContext ? compactRunDelta(previousRunContext, runContext) : {};
   const definitionPayload = pendingCardDefinitionPayload();
+  const advisories = collectContextAdvisories(state);
+  const advisoryPayload = advisories.length ? { advisories } : {};
   previousState = compact;
   if (runContext) previousRunContext = runContext;
   if (includeMap) mapCache.emittedVersion = state.map_version;
-  if (actionResult) return { result: actionResult, changes: change ?? {}, ...runPayload, ...definitionPayload };
+  if (actionResult) {
+    return { result: actionResult, changes: change ?? {}, ...runPayload, ...definitionPayload, ...advisoryPayload };
+  }
   return deltaOnly
-    ? { delta: change ?? {}, ...runPayload, ...definitionPayload }
-    : { ...compact, ...runPayload, ...definitionPayload };
+    ? { delta: change ?? {}, ...runPayload, ...definitionPayload, ...advisoryPayload }
+    : { ...compact, ...runPayload, ...definitionPayload, ...advisoryPayload };
 }
 
 async function listTools() {
@@ -1869,9 +1969,68 @@ async function runSafetySelfTests() {
     if (error.message !== "get_screen_state: permission denied") throw error;
   }
 
+  advisoryKeys = new Set();
+  const advisoryCombat = {
+    floor: 42,
+    room_phase: "COMBAT",
+    screen_type: "NONE",
+    combat_detail: { turn: 1, player: { stance: "Neutral" } },
+    hand: [{ id: "Normality", name: "凡庸" }],
+    monsters: [{
+      id: "Spiker",
+      name: "钉刺机",
+      current_hp: 40,
+      max_hp: 40,
+      is_gone: false,
+      intent: "ATTACK",
+      move: { damage: 7, hits: 1 },
+      powers: [{ id: "Thorns", amount: 5 }],
+    }],
+  };
+  const firstAdvisories = collectContextAdvisories(advisoryCombat);
+  if (!firstAdvisories.some(({ id }) => id === "per-hit-retaliation")
+      || !firstAdvisories.some(({ id }) => id === "normality")
+      || collectContextAdvisories(advisoryCombat).length !== 0) {
+    throw new Error("Self-test failed: contextual advisories were missing or repeated in one combat turn");
+  }
+  const nextTurnAdvisories = collectContextAdvisories({
+    ...advisoryCombat,
+    combat_detail: { turn: 2, player: { stance: "Neutral" } },
+  });
+  if (nextTurnAdvisories.length !== 1 || nextTurnAdvisories[0].id !== "normality") {
+    throw new Error("Self-test failed: turn-scoped Normality advisory did not refresh exactly once");
+  }
+  const timeEaterAdvisories = collectContextAdvisories({
+    ...advisoryCombat,
+    hand: [],
+    monsters: [{
+      id: "TimeEater",
+      name: "时间吞噬者",
+      current_hp: 456,
+      max_hp: 456,
+      is_gone: false,
+      intent: "ATTACK",
+      move: { damage: 8, hits: 3 },
+      powers: [{ id: "Time Warp", amount: 0 }],
+    }],
+  });
+  if (!timeEaterAdvisories.some(({ id }) => id === "time-eater")) {
+    throw new Error("Self-test failed: boss identity did not produce a contextual advisory");
+  }
+  const restAdvisories = collectContextAdvisories({
+    floor: 43,
+    room_phase: "COMPLETE",
+    screen_type: "REST",
+    run_detail: { relics: [{ id: "Coffee Dripper", name: "咖啡滤杯" }] },
+  });
+  if (restAdvisories.length !== 1 || restAdvisories[0].id !== "coffee-dripper") {
+    throw new Error("Self-test failed: Coffee Dripper Rest advisory was not emitted");
+  }
+
   combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
   turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
-  process.stdout.write("Self-tests passed: safety guards, stable combat state, transient reward, event and hand-selection reads, 1-based choices, act-aware map graph, semantic delta, and run changes\n");
+  advisoryKeys = new Set();
+  process.stdout.write("Self-tests passed: safety guards, contextual advisories, stable combat state, transient reward, event and hand-selection reads, 1-based choices, act-aware map graph, semantic delta, and run changes\n");
 }
 
 function runSyntheticBenchmark() {
@@ -2021,7 +2180,7 @@ const ACTION_PROPERTIES = {
 const PLUGIN_TOOLS = [
   {
     name: "get_state",
-    description: "Read settled game state. compact sends run context and the full map once per run/act; delta returns semantic changes; full is diagnostic and verbose.",
+    description: "Read settled game state. compact sends run context and the full map once per run/act; delta returns semantic changes; full is diagnostic and verbose. Contextual advisories are emitted once when relevant mechanics first appear.",
     inputSchema: {
       type: "object",
       properties: { mode: { type: "string", enum: ["compact", "delta", "full"], default: "compact" } },
@@ -2233,7 +2392,7 @@ async function handleMcpMessage(message) {
         protocolVersion: params.protocolVersion ?? "2024-11-05",
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: "spire-copilot", version: pluginVersion },
-        instructions: "Read get_state before acting. Card definitions are sent once and later states use refs; use inspect_card to verify one effect without requesting full state. Use act for normal play and act_many only for short safe sequences. Resolve changing card choices with choice_text or choice_uuid; shops require choice_text. Never resend end_turn after timeout; read state instead.",
+        instructions: "Read get_state before acting and apply any contextual advisories before choosing actions. Card definitions are sent once and later states use refs; use inspect_card to verify one effect without requesting full state. Use act for normal play and act_many only for short safe sequences. Resolve changing card choices with choice_text or choice_uuid; shops require choice_text. Never resend end_turn after timeout; read state instead.",
       },
     };
   }

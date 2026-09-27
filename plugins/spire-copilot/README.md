@@ -28,6 +28,10 @@ damage-per-hit value for the affected enemy or enemies. Every mutating action
 also receives animation-aware pacing and a final refreshed state read, so a
 logical `ready_for_command` frame cannot make a batch outrun visible card and
 stance effects. Transient combat frames with incomplete data are filtered.
+Compact reads and action receipts also emit deduplicated `advisories` when a
+relevant special mechanic first appears, including supported boss openings,
+per-hit retaliation, Normality, unsafe Wrath turns, and Coffee Dripper at Rest
+sites. Unknown Mod encounters remain state-driven rather than guessed.
 
 The in-game `MCP The Spire` mod must remain enabled because it provides the
 downstream game endpoint.
