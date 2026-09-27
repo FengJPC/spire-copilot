@@ -24,6 +24,7 @@ Use the `spire_copilot` MCP tools for live game state and actions.
 - On card-selection screens, use `choice_uuid` from the latest `choices` entry whenever duplicate names are possible; otherwise use a unique `choice_text`. Never reuse a numeric `choice_index` after another card has been selected because the remaining cards may be renumbered.
 - In shops, call `choose` with a unique `choice_text`; never use a remembered numeric item index.
 - `act_many` may contain `choose` actions only when each uses a stable `choice_text` or `choice_uuid`; the runtime resolves them serially against fresh state.
+- If `act_many` returns `halted: true`, trust its completed-action count and refreshed changes, do not replay completed actions, and handle the failed action separately only after checking `failed_action_status`.
 - Send a known-lethal targeted attack separately, refresh state, and then target the remaining enemies.
 - While Normality is in hand, play no more than three cards that turn. Refresh after Normality leaves the hand.
 - Against Time Eater, read the `Time Warp` amount before every sequence. Make the twelfth card deliberate and ensure defense is already sufficient before it resolves.

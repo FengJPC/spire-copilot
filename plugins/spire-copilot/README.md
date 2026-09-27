@@ -8,7 +8,8 @@ The plugin exposes three MCP tools:
 - `get_state`: one-time run context, semantic delta, or diagnostic full state.
 - `act`: one settled, safety-checked action with a compact result and changes.
 - `act_many`: a short serial sequence that stops when the target set or turn
-  changes.
+  changes. If a later action fails, its normal result identifies completed,
+  failed, and remaining actions together with the refreshed game state.
 
 Choice screens expose consistent 1-based indices plus stable card identities.
 Use `choice_text` for unique names or `choice_uuid` for an exact card instance;

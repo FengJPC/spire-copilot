@@ -2,6 +2,17 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.7] - 2026-09-27
+
+### Fixed
+
+- Return a settled, non-error `act_many` receipt when a later action fails
+  after earlier actions have already completed. The receipt identifies the
+  completed actions, failed action, execution certainty, unexecuted remainder,
+  and refreshed post-failure state.
+- Preserve ordinary tool errors for single actions while preventing partial
+  batch side effects from being hidden behind a generic MCP error.
+
 ## [0.2.6] - 2026-09-27
 
 ### Added

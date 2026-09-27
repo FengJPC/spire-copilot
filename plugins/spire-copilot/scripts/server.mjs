@@ -2,7 +2,7 @@
 
 import readline from "node:readline";
 
-const pluginVersion = "0.2.6";
+const pluginVersion = "0.2.7";
 const endpoint = process.env.STS_MCP_URL ?? "http://127.0.0.1:8080/mcp";
 const accept = "application/json, text/event-stream";
 const pollMs = Number(process.env.STS_POLL_MS ?? 180);
@@ -852,6 +852,42 @@ function actionSummary(action, extra = {}) {
   };
 }
 
+function failedBatchReceipt(actions, index, error, downstreamAccepted, stateRefreshError = undefined) {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    action: "act_many",
+    halted: true,
+    reason: "ACTION_FAILED",
+    completed_actions: index,
+    ...(index ? { completed: actions.slice(0, index).map((action) => actionSummary(action)) } : {}),
+    failed_action: actionSummary(actions[index]),
+    failed_action_status: downstreamAccepted ? "outcome_uncertain" : "not_executed",
+    error: message,
+    remaining_actions: actions.slice(index + 1),
+    state_status: stateRefreshError ? "last_known" : "refreshed_after_failure",
+    ...(stateRefreshError ? {
+      state_refresh_error: stateRefreshError instanceof Error ? stateRefreshError.message : String(stateRefreshError),
+    } : {}),
+  };
+}
+
+async function settleFailedBatchAction({ state, actions, index, error, downstreamAccepted }) {
+  let currentState = state;
+  let stateRefreshError;
+  try {
+    await sleep(settleMs);
+    currentState = await decisionState();
+    syncCombatSafety(currentState);
+  } catch (refreshError) {
+    stateRefreshError = refreshError;
+  }
+  return rememberAndCompact(
+    currentState,
+    false,
+    failedBatchReceipt(actions, index, error, downstreamAccepted, stateRefreshError),
+  );
+}
+
 function rememberAndCompact(state, deltaOnly = false, actionResult = undefined) {
   const includeMap = state.map_version && mapCache.emittedVersion !== state.map_version;
   const compact = compactState(state, { includeMap });
@@ -914,41 +950,54 @@ async function safeExecuteActions(actions, wait = true) {
     const beforeTurn = state?.combat_detail?.turn;
 
     let settledByDedicatedWait = false;
-    if (action.action === "wait") {
-      await sleep(Math.min(500, Math.max(0, Number(action.ms ?? 100))));
-    } else {
-      if (isPlayCardAction(action)) normalitySafetyCheck(state, [action]);
-      let toolCall = actionToolCall(action);
-      if (toolCall) {
-        if (toolCall.name === "choose") {
-          toolCall = { ...toolCall, args: normalizeChooseArgs(state, toolCall.args) };
-        }
-        if (toolCall.name === "end_turn") markEndTurnSent(state);
-        await validateToolCall(toolCall.name, toolCall.args);
-        try {
-          await rawTool(toolCall.name, toolCall.args);
-        } catch (error) {
-          if (toolCall.name === "end_turn") turnTransitionSafety.endTurnSent = false;
-          throw error;
-        }
-        if (toolCall.name === "play_card") combatSafety.cardsPlayed += 1;
-        if (toolCall.name === "end_turn" && wait) {
-          state = await waitForEndTurnSettlement({ floor: state.floor, turn: beforeTurn });
-          settledByDedicatedWait = true;
-        } else if (toolCall.name === "choose" && state.screen_type === "HAND_SELECT") {
-          state = await waitForHandSelectionChoiceSettlement(state);
-          settledByDedicatedWait = true;
-        }
+    let toolCall;
+    let downstreamAccepted = false;
+    try {
+      if (action.action === "wait") {
+        await sleep(Math.min(500, Math.max(0, Number(action.ms ?? 100))));
+        downstreamAccepted = true;
       } else {
-        await rawTool("execute_actions", { actions: [action] });
+        if (isPlayCardAction(action)) normalitySafetyCheck(state, [action]);
+        toolCall = actionToolCall(action);
+        if (toolCall) {
+          if (toolCall.name === "choose") {
+            toolCall = { ...toolCall, args: normalizeChooseArgs(state, toolCall.args) };
+          }
+          if (toolCall.name === "end_turn") markEndTurnSent(state);
+          await validateToolCall(toolCall.name, toolCall.args);
+          await rawTool(toolCall.name, toolCall.args);
+          downstreamAccepted = true;
+          if (toolCall.name === "play_card") combatSafety.cardsPlayed += 1;
+          if (toolCall.name === "end_turn" && wait) {
+            state = await waitForEndTurnSettlement({ floor: state.floor, turn: beforeTurn });
+            settledByDedicatedWait = true;
+          } else if (toolCall.name === "choose" && state.screen_type === "HAND_SELECT") {
+            state = await waitForHandSelectionChoiceSettlement(state);
+            settledByDedicatedWait = true;
+          }
+        } else {
+          await rawTool("execute_actions", { actions: [action] });
+          downstreamAccepted = true;
+        }
       }
-    }
 
-    if (!settledByDedicatedWait) {
-      await sleep(settleMs);
-      state = await decisionState();
+      if (!settledByDedicatedWait) {
+        await sleep(settleMs);
+        state = await decisionState();
+      }
+      syncCombatSafety(state);
+    } catch (error) {
+      if (toolCall?.name === "end_turn" && !downstreamAccepted) {
+        turnTransitionSafety.endTurnSent = false;
+      }
+      return settleFailedBatchAction({
+        state,
+        actions: normalizedActions,
+        index,
+        error,
+        downstreamAccepted,
+      });
     }
-    syncCombatSafety(state);
 
     const remaining = normalizedActions.slice(index + 1);
     const rosterChanged = monsterRosterKey(state) !== beforeRoster;
@@ -1317,6 +1366,33 @@ async function runSafetySelfTests() {
     throw new Error("Self-test failed: enemy delta did not isolate the changed entity");
   }
 
+  const partialBatchFailure = failedBatchReceipt(
+    [
+      { action: "play_card", card_name: "旋身+" },
+      { action: "play_card", card_name: "化体为空+" },
+      { action: "end_turn" },
+    ],
+    1,
+    new Error("play_card: Card not found in hand: 化体为空+"),
+    false,
+  );
+  if (partialBatchFailure.completed_actions !== 1
+      || partialBatchFailure.completed?.[0]?.card !== "旋身+"
+      || partialBatchFailure.failed_action?.card !== "化体为空+"
+      || partialBatchFailure.failed_action_status !== "not_executed"
+      || partialBatchFailure.remaining_actions?.[0]?.action !== "end_turn"
+      || partialBatchFailure.state_status !== "refreshed_after_failure") {
+    throw new Error("Self-test failed: partial batch failure lost its completed, failed, or remaining action receipt");
+  }
+  if (failedBatchReceipt(
+    [{ action: "end_turn" }],
+    0,
+    new Error("settlement timed out"),
+    true,
+  ).failed_action_status !== "outcome_uncertain") {
+    throw new Error("Self-test failed: an accepted action with failed settlement was reported as not executed");
+  }
+
   const runDelta = compactRunDelta(
     { deck: [], relics: [{ id: "Ring", n: "蛇之戒指" }], potions: [] },
     { deck: [], relics: [{ id: "Ring", n: "蛇之戒指" }, { id: "Letter Opener", n: "开信刀" }], potions: [] },
@@ -1484,7 +1560,7 @@ const PLUGIN_TOOLS = [
   },
   {
     name: "act_many",
-    description: "Execute a short safe sequence serially and return settled semantic changes. Each choice_text or choice_uuid is re-resolved against fresh state; stops if the turn or enemy roster changes. Send lethal targeted attacks separately.",
+    description: "Execute a short safe sequence serially and return settled semantic changes. Each choice_text or choice_uuid is re-resolved against fresh state; stops if the turn or enemy roster changes. A later failure returns a halted receipt with completed, failed, and remaining actions plus refreshed state. Send lethal targeted attacks separately.",
     inputSchema: {
       type: "object",
       properties: {
