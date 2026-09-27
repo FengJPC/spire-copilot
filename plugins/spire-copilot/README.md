@@ -22,7 +22,10 @@ map screens reuse `map_ref`; each node uses `s` for its room symbol and `to` for
 child coordinates. Deck, relic, potion, stance, and player-power changes are
 reported explicitly. Card effects are emitted once in `card_defs`, newly seen
 cards arrive in `card_defs_added`, and later choices retain only stable refs and
-live values. Transient combat frames with incomplete data are filtered.
+live values. Stance and debuff changes update matching hand refs in place rather
+than resending whole cards. Target-only modifiers add `ed`, a compact estimated
+damage-per-hit value for the affected enemy or enemies. Transient combat frames
+with incomplete data are filtered.
 
 The in-game `MCP The Spire` mod must remain enabled because it provides the
 downstream game endpoint.

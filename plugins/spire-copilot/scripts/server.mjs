@@ -2,7 +2,7 @@
 
 import readline from "node:readline";
 
-const pluginVersion = "0.2.8";
+const pluginVersion = "0.2.9";
 const endpoint = process.env.STS_MCP_URL ?? "http://127.0.0.1:8080/mcp";
 const accept = "application/json, text/event-stream";
 const pollMs = Number(process.env.STS_POLL_MS ?? 180);
@@ -732,10 +732,46 @@ function actionToolCall(action) {
   return null;
 }
 
-function compactCard(card) {
+function powerAmount(entity, ids) {
+  const power = (entity?.powers ?? []).find((item) => ids.has(item?.id));
+  return Number.isFinite(power?.amount) ? power.amount : power ? 1 : 0;
+}
+
+function hasRelic(state, ids) {
+  return (state?.run_detail?.relics ?? []).some((relic) => ids.has(relic?.id));
+}
+
+function estimatedDamagePerHit(card, target, state) {
+  if (!Number.isFinite(card?.damage) || card.damage < 0 || !card?.has_target) return undefined;
+  let damage = card.damage;
+  if (powerAmount(target, new Set(["Vulnerable"])) > 0) {
+    damage = Math.floor(damage * (hasRelic(state, new Set(["Paper Frog", "PaperPhrog"])) ? 1.75 : 1.5));
+  }
+  const slow = powerAmount(target, new Set(["Slow"]));
+  if (slow > 0) damage = Math.floor(damage * (1 + slow * 0.1));
+  if (powerAmount(target, new Set(["Flight"])) > 0) damage = Math.floor(damage * 0.5);
+  if (powerAmount(target, new Set(["Intangible"])) > 0) damage = Math.min(damage, 1);
+  return Math.max(0, damage);
+}
+
+function targetDamageEstimate(card, state) {
+  if (!Number.isFinite(card?.damage) || card.damage < 0 || !card?.has_target) return undefined;
+  const targets = (state?.monsters ?? []).filter((monster) => !monster.is_gone);
+  const changed = targets.map((target, index) => ({
+    i: index + 1,
+    d: estimatedDamagePerHit(card, target, state),
+  })).filter((entry) => Number.isFinite(entry.d) && entry.d !== card.damage);
+  if (!changed.length) return undefined;
+  if (targets.length === 1) return changed[0].d;
+  return Object.fromEntries(changed.map(({ i, d }) => [i, d]));
+}
+
+function compactCard(card, state = undefined) {
   const value = { n: card.name, c: card.cost, ...(cardRef(card) ? { ref: cardRef(card) } : {}) };
   if (card.is_playable === false) value.p = false;
   if (Number.isFinite(card.damage) && card.damage >= 0) value.d = card.damage;
+  const effectiveDamage = targetDamageEstimate(card, state);
+  if (effectiveDamage !== undefined) value.ed = effectiveDamage;
   if (Number.isFinite(card.block) && card.block >= 0) value.b = card.block;
   if (card.magic_number) value.m = card.magic_number;
   if (card.upgrades) value.u = card.upgrades;
@@ -933,7 +969,7 @@ function compactState(state, { includeMap = true } = {}) {
       ...(m.powers?.length ? { powers: m.powers.map((power) => ({ id: power.id, ...(power.amount ? { n: power.amount } : {}) })) } : {}),
     }));
   }
-  if (state.hand?.length) out.hand = state.hand.map(compactCard);
+  if (state.hand?.length) out.hand = state.hand.map((card) => compactCard(card, state));
   if (state.choice_list?.length) {
     const cards = choiceCards(state);
     out.choices = state.choice_list.map((text, index) => ({
@@ -976,6 +1012,46 @@ function multisetDifference(before, after) {
   return { removed, added };
 }
 
+function handCardKey(card) {
+  return card?.ref ?? card?.n;
+}
+
+function handArrayDifference(before, after) {
+  const beforeRemaining = before.map((item) => ({ item }));
+  const afterRemaining = after.map((item) => ({ item }));
+  const consumeMatch = (left, right, predicate) => {
+    for (let rightIndex = right.length - 1; rightIndex >= 0; rightIndex -= 1) {
+      const leftIndex = left.findIndex((entry) => predicate(entry.item, right[rightIndex].item));
+      if (leftIndex < 0) continue;
+      left.splice(leftIndex, 1);
+      right.splice(rightIndex, 1);
+    }
+  };
+
+  consumeMatch(beforeRemaining, afterRemaining, (left, right) => JSON.stringify(left) === JSON.stringify(right));
+  const changed = [];
+  for (let afterIndex = afterRemaining.length - 1; afterIndex >= 0; afterIndex -= 1) {
+    const next = afterRemaining[afterIndex];
+    const key = handCardKey(next.item);
+    if (!key) continue;
+    const beforeIndex = beforeRemaining.findIndex((entry) => handCardKey(entry.item) === key);
+    if (beforeIndex < 0) continue;
+    const previous = beforeRemaining[beforeIndex];
+    const delta = diffValue(previous.item, next.item);
+    if (delta !== undefined) changed.unshift({ key, ...delta });
+    beforeRemaining.splice(beforeIndex, 1);
+    afterRemaining.splice(afterIndex, 1);
+  }
+
+  const removed = beforeRemaining.map(({ item }) => item);
+  const added = afterRemaining.map(({ item }) => item);
+  return {
+    ...(changed.length ? { changed } : {}),
+    ...(removed.length ? { removed } : {}),
+    ...(added.length ? { added } : {}),
+  };
+}
+
 function entityArrayDifference(before, after) {
   const keyFor = (item) => item?.i ?? item?.id ?? item?.slot;
   const beforeMap = new Map(before.map((item) => [keyFor(item), item]));
@@ -996,7 +1072,8 @@ function entityArrayDifference(before, after) {
 function diffValue(before, after, key = "") {
   if (JSON.stringify(before) === JSON.stringify(after)) return undefined;
   if (Array.isArray(before) && Array.isArray(after)) {
-    if (["hand", "deck"].includes(key)) {
+    if (key === "hand") return handArrayDifference(before, after);
+    if (key === "deck") {
       const { removed, added } = multisetDifference(before, after);
       return {
         ...(removed.length ? { removed } : {}),
@@ -1620,6 +1697,50 @@ async function runSafetySelfTests() {
     throw new Error("Self-test failed: hand delta was not semantic");
   }
 
+  const scaledHandDelta = diffValue(
+    { hand: [{ n: "打击", ref: "Strike_R@0", c: 1, d: 6, t: true }, { n: "防御", ref: "Defend_R@0", c: 1, b: 5 }] },
+    { hand: [{ n: "打击", ref: "Strike_R@0", c: 1, d: 12, t: true }, { n: "防御", ref: "Defend_R@0", c: 1, b: 5 }] },
+  );
+  if (scaledHandDelta.hand.changed?.[0]?.key !== "Strike_R@0"
+      || scaledHandDelta.hand.changed[0].d !== 12
+      || scaledHandDelta.hand.removed
+      || scaledHandDelta.hand.added) {
+    throw new Error("Self-test failed: hand stat update was expanded into remove/add churn");
+  }
+
+  const duplicateHandDelta = diffValue(
+    { hand: [{ n: "化体为空", ref: "EmptyBody@0", c: 1 }, { n: "化体为空", ref: "EmptyBody@0", c: 1 }] },
+    { hand: [{ n: "化体为空", ref: "EmptyBody@0", c: 1 }, { n: "化体为空", ref: "EmptyBody@0", c: 0 }] },
+  );
+  if (duplicateHandDelta.hand.changed?.length !== 1
+      || duplicateHandDelta.hand.changed[0].c !== 0
+      || duplicateHandDelta.hand.removed
+      || duplicateHandDelta.hand.added) {
+    throw new Error("Self-test failed: duplicate hand refs did not preserve an in-place stat update");
+  }
+
+  const targetAdjustedDamage = compactState({
+    ready_for_command: true,
+    screen_type: "NONE",
+    hand: [{ id: "Strike_R", name: "打击", cost: 1, damage: 8, has_target: true }],
+    monsters: [{ name: "易伤目标", current_hp: 20, max_hp: 20, is_gone: false, powers: [{ id: "Vulnerable", amount: 1 }] }],
+  });
+  if (targetAdjustedDamage.hand[0]?.d !== 8 || targetAdjustedDamage.hand[0]?.ed !== 12) {
+    throw new Error("Self-test failed: target-adjusted damage estimate omitted vulnerability");
+  }
+  const multiTargetDamage = compactState({
+    ready_for_command: true,
+    screen_type: "NONE",
+    hand: [{ id: "Strike_R", name: "打击", cost: 1, damage: 8, has_target: true }],
+    monsters: [
+      { name: "易伤目标", current_hp: 20, max_hp: 20, is_gone: false, powers: [{ id: "Vulnerable", amount: 1 }] },
+      { name: "普通目标", current_hp: 20, max_hp: 20, is_gone: false, powers: [] },
+    ],
+  });
+  if (multiTargetDamage.hand[0]?.ed?.[1] !== 12 || multiTargetDamage.hand[0]?.ed?.[2] !== undefined) {
+    throw new Error("Self-test failed: multi-target damage estimate did not isolate modified enemies");
+  }
+
   const semanticEnemyDelta = diffValue(
     { enemies: [{ i: 1, n: "大颚虫", hp: "44/44" }] },
     { enemies: [{ i: 1, n: "大颚虫", hp: "36/44" }] },
@@ -1772,6 +1893,15 @@ function runSyntheticBenchmark() {
     screen_state: legacyGridPayload.details,
   });
   const compactGridPayload = { choices: compactGridState.choices, details: compactGridState.details };
+  const stanceBefore = [
+    { n: "打击", ref: "Strike_P@1", c: 1, d: 9, u: 1, t: true },
+    { n: "不惧妖邪", ref: "FearNoEvil@0", c: 1, d: 8, t: true },
+    { n: "斩破命运", ref: "CutThroughFate@0", c: 1, d: 7, m: 2, t: true },
+    { n: "防御", ref: "Defend_P@1", c: 1, b: 8, u: 1 },
+  ];
+  const stanceAfter = stanceBefore.map((card) => card.d ? { ...card, d: card.d * 2 } : card);
+  const legacyStanceDelta = { hand: multisetDifference(stanceBefore, stanceAfter) };
+  const compactStanceDelta = { hand: handArrayDifference(stanceBefore, stanceAfter) };
   process.stdout.write(`${JSON.stringify({
     fixture: "single-combat-decision",
     repeated_state_bytes_per_followup: bytes(after),
@@ -1783,6 +1913,9 @@ function runSyntheticBenchmark() {
     grid_20_card_legacy_bytes: bytes(legacyGridPayload),
     grid_20_card_compact_bytes: bytes(compactGridPayload),
     grid_20_card_reduction_percent: Number(((1 - bytes(compactGridPayload) / bytes(legacyGridPayload)) * 100).toFixed(1)),
+    stance_hand_legacy_delta_bytes: bytes(legacyStanceDelta),
+    stance_hand_compact_delta_bytes: bytes(compactStanceDelta),
+    stance_hand_reduction_percent: Number(((1 - bytes(compactStanceDelta) / bytes(legacyStanceDelta)) * 100).toFixed(1)),
     note: "Synthetic regression fixture; not a published real-run token claim",
   }, null, 2)}\n`);
 }

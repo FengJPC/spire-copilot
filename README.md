@@ -7,6 +7,10 @@ Slay the Spire run. It adds a compact, safety-aware bridge in front of the
 ## What it adds
 
 - One-time run context plus semantic state deltas to reduce context usage.
+- In-place hand-stat deltas for stance, Weak, and other live value changes,
+  avoiding remove-and-add churn for cards that remain in hand.
+- Target-adjusted per-hit damage estimates only when enemy Vulnerable, Slow,
+  Flight, or Intangible changes the displayed card damage.
 - One-time card-effect definitions with incremental definitions for newly seen
   cards, plus an `inspect_card` lookup for targeted verification.
 - Screen-aware GRID compaction that keeps stable identities and live values

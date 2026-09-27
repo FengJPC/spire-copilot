@@ -2,6 +2,19 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.9] - 2026-09-27
+
+### Added
+
+- Add compact target-adjusted per-hit damage estimates when enemy Vulnerable,
+  Slow, Flight, or Intangible changes a targeted attack's live damage.
+
+### Changed
+
+- Match cards by stable refs in hand deltas so stance, Weak, cost, block, and
+  other live-value updates are emitted as small `changed` records instead of
+  removing and re-adding complete card objects.
+
 ## [0.2.8] - 2026-09-27
 
 ### Added
