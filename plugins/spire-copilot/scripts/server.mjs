@@ -2,11 +2,12 @@
 
 import readline from "node:readline";
 
-const pluginVersion = "0.2.9";
+const pluginVersion = "0.2.10";
 const endpoint = process.env.STS_MCP_URL ?? "http://127.0.0.1:8080/mcp";
 const accept = "application/json, text/event-stream";
 const pollMs = Number(process.env.STS_POLL_MS ?? 180);
 const settleMs = Number(process.env.STS_SETTLE_MS ?? 250);
+const visualSettleMs = Number(process.env.STS_VISUAL_SETTLE_MS ?? 600);
 const timeoutMs = Number(process.env.STS_WAIT_TIMEOUT_MS ?? 20000);
 
 let sessionId;
@@ -31,6 +32,25 @@ const NORMALITY_IDS = new Set(["Normality"]);
 const NORMALITY_NAMES = new Set(["Normality", "凡庸"]);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function visualDelayForAction(name) {
+  if (["play_card", "use_potion", "end_turn"].includes(name)) return visualSettleMs;
+  if (["choose", "confirm", "proceed", "skip", "cancel", "discard_potion"].includes(name)) {
+    return Math.min(300, visualSettleMs);
+  }
+  return 0;
+}
+
+async function waitForVisualSettlement(
+  name,
+  state,
+  { pause = sleep, readState = decisionState } = {},
+) {
+  const delay = visualDelayForAction(name);
+  if (delay <= 0) return state;
+  await pause(delay);
+  return readState();
+}
 
 function resetMapCache() {
   mapCache = { act: null, nodes: null, version: null, emittedVersion: null };
@@ -1266,6 +1286,9 @@ async function safeExecuteActions(actions, wait = true) {
         await sleep(settleMs);
         state = await decisionState();
       }
+      if (wait && action.action !== "wait") {
+        state = await waitForVisualSettlement(toolCall?.name ?? action.action, state);
+      }
       syncCombatSafety(state);
     } catch (error) {
       if (toolCall?.name === "end_turn" && !downstreamAccepted) {
@@ -1338,20 +1361,23 @@ async function callAndSettle(name, args = {}, wait = true) {
     return { ok: true, result: called.message };
   }
   if (name === "end_turn") {
-    const state = await waitForEndTurnSettlement({
+    let state = await waitForEndTurnSettlement({
       floor: callState.floor,
       turn: callState.combat_detail.turn,
     });
+    state = await waitForVisualSettlement(name, state);
     syncCombatSafety(state);
     return rememberAndCompact(state, false, actionSummary({ action: name, ...summaryArgs }));
   }
   if (name === "choose" && callState?.screen_type === "HAND_SELECT") {
-    const state = await waitForHandSelectionChoiceSettlement(callState);
+    let state = await waitForHandSelectionChoiceSettlement(callState);
+    state = await waitForVisualSettlement(name, state);
     syncCombatSafety(state);
     return rememberAndCompact(state, false, actionSummary({ action: name, ...summaryArgs }));
   }
   await sleep(settleMs);
-  const state = await decisionState();
+  let state = await decisionState();
+  state = await waitForVisualSettlement(name, state);
   syncCombatSafety(state);
   return rememberAndCompact(state, false, actionSummary({ action: name, ...summaryArgs }));
 }
@@ -1379,6 +1405,26 @@ async function runSafetySelfTests() {
     }
     throw new Error(`Self-test failed: ${label} did not throw`);
   };
+
+  let observedVisualDelay = -1;
+  let visualRefreshes = 0;
+  const visuallySettled = await waitForVisualSettlement(
+    "play_card",
+    { marker: "logical" },
+    {
+      pause: async (delay) => { observedVisualDelay = delay; },
+      readState: async () => { visualRefreshes += 1; return { marker: "visual" }; },
+    },
+  );
+  if (observedVisualDelay !== visualSettleMs
+      || visualRefreshes !== 1
+      || visuallySettled.marker !== "visual") {
+    throw new Error("Self-test failed: play-card settlement did not wait for visual pacing and refresh state");
+  }
+  const nonVisualState = { marker: "unchanged" };
+  if (await waitForVisualSettlement("get_state", nonVisualState) !== nonVisualState) {
+    throw new Error("Self-test failed: read-only state call received an unnecessary visual delay");
+  }
 
   combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
   expectThrow("Normality rejects a fourth queued card", () => normalitySafetyCheck(baseState, [

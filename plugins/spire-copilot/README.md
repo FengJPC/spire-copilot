@@ -24,8 +24,10 @@ reported explicitly. Card effects are emitted once in `card_defs`, newly seen
 cards arrive in `card_defs_added`, and later choices retain only stable refs and
 live values. Stance and debuff changes update matching hand refs in place rather
 than resending whole cards. Target-only modifiers add `ed`, a compact estimated
-damage-per-hit value for the affected enemy or enemies. Transient combat frames
-with incomplete data are filtered.
+damage-per-hit value for the affected enemy or enemies. Every mutating action
+also receives animation-aware pacing and a final refreshed state read, so a
+logical `ready_for_command` frame cannot make a batch outrun visible card and
+stance effects. Transient combat frames with incomplete data are filtered.
 
 The in-game `MCP The Spire` mod must remain enabled because it provides the
 downstream game endpoint.

@@ -23,6 +23,7 @@ Use the `spire_copilot` MCP tools for live game state and actions.
 
 - Prefer `act` for individual decisions. Use `act_many` only for a short sequence whose targets and turn cannot change unexpectedly.
 - Action tools return a compact `result` receipt and settled `changes`; treat those changes as authoritative and call `get_state` only when the result is ambiguous or the user reports a mismatch.
+- Action settlement includes a short visual cooldown and a refreshed state read. Do not add manual delay actions during ordinary play unless the user still reports that the visible game is behind the returned state.
 - Never resend `end_turn` after a timeout or uncertain response. Read state instead. The tool normally returns only after the next turn is ready.
 - On card-selection screens, use `choice_uuid` from the latest `choices` entry whenever duplicate names are possible; otherwise use a unique `choice_text`. Never reuse a numeric `choice_index` after another card has been selected because the remaining cards may be renumbered.
 - In shops, call `choose` with a unique `choice_text`; never use a remembered numeric item index.

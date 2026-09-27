@@ -2,6 +2,17 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.10] - 2026-09-27
+
+### Fixed
+
+- Add animation-aware pacing after cards, potions, turn transitions, and
+  screen choices, followed by a refreshed state read. This prevents a logical
+  `ready_for_command` response from letting `act_many` outrun visible effects
+  such as Miracle's full-screen color overlay.
+- Expose `STS_VISUAL_SETTLE_MS` for machines or Mod combinations that need a
+  longer or shorter visual cooldown; the default is 600 ms.
+
 ## [0.2.9] - 2026-09-27
 
 ### Added

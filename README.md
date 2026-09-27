@@ -16,6 +16,8 @@ Slay the Spire run. It adds a compact, safety-aware bridge in front of the
 - Screen-aware GRID compaction that keeps stable identities and live values
   without repeating every full card object.
 - Settled action responses that wait for animations and turn transitions.
+- Animation-aware action pacing that prevents batches from advancing while a
+  visible card, potion, or stance effect is still catching up.
 - Guards for Normality, duplicate end turns, changing enemy targets, shop item
   reindexing, and card-selection reindexing.
 - Consistent 1-based choice indices across state and action calls.
@@ -70,6 +72,7 @@ Optional timing variables:
 
 - `STS_POLL_MS` (default `180`)
 - `STS_SETTLE_MS` (default `250`)
+- `STS_VISUAL_SETTLE_MS` (default `600`)
 - `STS_WAIT_TIMEOUT_MS` (default `20000`)
 
 Development checks:
