@@ -2,14 +2,14 @@
 
 import readline from "node:readline";
 
-const pluginVersion = "0.2.13";
+const pluginVersion = "0.2.15";
 const endpoint = process.env.STS_MCP_URL ?? "http://127.0.0.1:8080/mcp";
 const accept = "application/json, text/event-stream";
 const pollMs = Number(process.env.STS_POLL_MS ?? 180);
 const settleMs = Number(process.env.STS_SETTLE_MS ?? 250);
 const visualSettleMs = Number(process.env.STS_VISUAL_SETTLE_MS ?? 600);
 const timeoutMs = Number(process.env.STS_WAIT_TIMEOUT_MS ?? 20000);
-const batchTimeoutMs = Number(process.env.STS_BATCH_TIMEOUT_MS ?? 45000);
+const batchTimeoutMs = Number(process.env.STS_BATCH_TIMEOUT_MS ?? 20000);
 
 let sessionId;
 let requestId = 1;
@@ -711,6 +711,138 @@ async function waitForHandSelectionChoiceSettlement(
   } while (true);
 }
 
+function actionTransitionEvidence(start, state) {
+  if (state?.floor !== start?.floor) return "floor_changed";
+  if (state?.room_phase !== start?.room_phase) return "room_phase_changed";
+  if (state?.screen_type !== start?.screen_type) return "screen_changed";
+  const beforeTurn = start?.combat_detail?.turn;
+  const afterTurn = state?.combat_detail?.turn;
+  if (Number.isFinite(beforeTurn) && Number.isFinite(afterTurn) && afterTurn !== beforeTurn) {
+    return "turn_changed";
+  }
+  if (monsterRosterKey(state) !== monsterRosterKey(start)) return "enemy_roster_changed";
+  return undefined;
+}
+
+function cardIdentityMatches(card, selected) {
+  if (!card || !selected) return false;
+  if (selected.uuid) return card.uuid === selected.uuid;
+  if (selected.id) return card.id === selected.id;
+  return card.name === selected.name;
+}
+
+function actionObservableState(state) {
+  return {
+    energy: state?.current_energy,
+    hand: (state?.hand ?? []).map((card) => ({
+      uuid: card.uuid,
+      id: card.id,
+      name: card.name,
+      cost: card.cost,
+      playable: card.is_playable,
+    })),
+    combat: state?.combat_detail ? {
+      player: state.combat_detail.player,
+      draw: state.combat_detail.draw_count,
+      discard: state.combat_detail.discard_count,
+      exhaust: state.combat_detail.exhaust_count,
+      limbo: state.combat_detail.limbo_count,
+      discarded: state.combat_detail.cards_discarded_this_turn,
+    } : undefined,
+    monsters: (state?.monsters ?? []).map((monster) => ({
+      id: monster.id,
+      name: monster.name,
+      hp: monster.current_hp,
+      block: monster.block,
+      gone: monster.is_gone,
+      intent: monster.intent,
+      powers: monster.powers,
+    })),
+    potions: state?.run_detail?.potions,
+    relics: (state?.run_detail?.relics ?? []).map((relic) => ({ id: relic.id, counter: relic.counter })),
+    choices: state?.choice_list,
+    canProceed: state?.can_proceed,
+    screen: state?.screen_state,
+  };
+}
+
+function actionSettlementEvidence(action, start, state) {
+  const transition = actionTransitionEvidence(start, state);
+  if (transition) return transition;
+
+  if (isPlayCardAction(action)) {
+    const selected = cardForAction(start, action);
+    if (selected && !(state?.hand ?? []).some((card) => cardIdentityMatches(card, selected))) {
+      return "card_left_hand";
+    }
+  }
+
+  if (JSON.stringify(actionObservableState(state)) !== JSON.stringify(actionObservableState(start))) {
+    return "state_changed";
+  }
+  return undefined;
+}
+
+function makeSettlementTimeout(action, timeout, lastState) {
+  const error = new Error(
+    `Timed out after ${timeout}ms waiting for ${action.action} result verification. `
+    + "The command was already accepted; inspect state but do not resend it.",
+  );
+  error.code = "ACTION_SETTLEMENT_TIMEOUT";
+  error.lastState = lastState;
+  return error;
+}
+
+function isTimeoutError(error) {
+  return error?.code === "ACTION_SETTLEMENT_TIMEOUT"
+    || /^Timed out after \d+ms/i.test(String(error?.message ?? error));
+}
+
+async function waitForActionSettlement(
+  action,
+  start,
+  {
+    timeout = batchTimeoutMs,
+    waitForVisual = true,
+    readState = (remaining) => decisionState({ timeout: remaining }),
+    pause = sleep,
+    now = Date.now,
+  } = {},
+) {
+  const started = now();
+  let lastState = start;
+  do {
+    const elapsed = now() - started;
+    const remainingBeforePause = timeout - elapsed;
+    if (remainingBeforePause <= 0) throw makeSettlementTimeout(action, timeout, lastState);
+    await pause(Math.min(pollMs, remainingBeforePause));
+
+    const remaining = timeout - (now() - started);
+    if (remaining <= 0) throw makeSettlementTimeout(action, timeout, lastState);
+    try {
+      lastState = await readState(Math.max(1, remaining));
+    } catch (error) {
+      if (isTimeoutError(error)) throw makeSettlementTimeout(action, timeout, lastState);
+      error.code ??= "ACTION_VERIFICATION_ERROR";
+      error.lastState ??= lastState;
+      throw error;
+    }
+
+    const evidence = actionSettlementEvidence(action, start, lastState);
+    if (!evidence) continue;
+
+    const minimumPacing = waitForVisual ? visualDelayForAction(action.action) : 0;
+    const pacingRemaining = minimumPacing - (now() - started);
+    if (pacingRemaining > 0) {
+      if (pacingRemaining > timeout - (now() - started)) {
+        throw makeSettlementTimeout(action, timeout, lastState);
+      }
+      await pause(pacingRemaining);
+    }
+    return { state: lastState, evidence, elapsedMs: now() - started };
+  } while (true);
+}
+
 function isNormality(card) {
   return NORMALITY_IDS.has(card?.id) || NORMALITY_NAMES.has(card?.name);
 }
@@ -1126,7 +1258,7 @@ function compactState(state, { includeMap = true } = {}) {
       ...(m.powers?.length ? { powers: m.powers.map((power) => ({ id: power.id, ...(power.amount ? { n: power.amount } : {}) })) } : {}),
     }));
   }
-  if (state.hand?.length) out.hand = state.hand.map((card) => compactCard(card, state));
+  if (Array.isArray(state.hand)) out.hand = state.hand.map((card) => compactCard(card, state));
   if (state.choice_list?.length) {
     const cards = choiceCards(state);
     out.choices = state.choice_list.map((text, index) => ({
@@ -1204,6 +1336,7 @@ function handArrayDifference(before, after) {
   const removed = beforeRemaining.map(({ item }) => item);
   const added = afterRemaining.map(({ item }) => item);
   return {
+    count: after.length,
     ...(changed.length ? { changed } : {}),
     ...(removed.length ? { removed } : {}),
     ...(added.length ? { added } : {}),
@@ -1290,14 +1423,25 @@ function actionSummary(action, extra = {}) {
 
 function failedBatchReceipt(actions, index, error, downstreamAccepted, stateRefreshError = undefined) {
   const message = error instanceof Error ? error.message : String(error);
+  const errorKind = !downstreamAccepted
+    ? "action_error"
+    : isTimeoutError(error)
+      ? "verification_timeout"
+      : "verification_error";
+  const failedStatus = !downstreamAccepted
+    ? "not_executed"
+    : errorKind === "verification_timeout"
+      ? "timeout_unknown"
+      : "outcome_uncertain";
   return {
     action: "act_many",
     halted: true,
-    reason: "ACTION_FAILED",
+    reason: errorKind.toUpperCase(),
     completed_actions: index,
     ...(index ? { completed: actions.slice(0, index).map((action) => actionSummary(action)) } : {}),
     failed_action: actionSummary(actions[index]),
-    failed_action_status: downstreamAccepted ? "outcome_uncertain" : "not_executed",
+    failed_action_status: failedStatus,
+    error_kind: errorKind,
     error: message,
     remaining_actions: actions.slice(index + 1),
     state_status: stateRefreshError ? "last_known" : "refreshed_after_failure",
@@ -1315,14 +1459,18 @@ async function settleFailedBatchAction({
   downstreamAccepted,
   timeout = batchTimeoutMs,
 }) {
-  let currentState = state;
+  let currentState = error?.lastState ?? state;
   let stateRefreshError;
-  try {
-    await sleep(settleMs);
-    currentState = await decisionState({ timeout });
-    syncCombatSafety(currentState);
-  } catch (refreshError) {
-    stateRefreshError = refreshError;
+  if (!isTimeoutError(error)) {
+    try {
+      await sleep(settleMs);
+      currentState = await decisionState({ timeout: Math.min(timeout, 5000) });
+      syncCombatSafety(currentState);
+    } catch (refreshError) {
+      stateRefreshError = refreshError;
+    }
+  } else {
+    stateRefreshError = new Error("Verification deadline expired; no second long refresh was attempted");
   }
   return rememberAndCompact(
     currentState,
@@ -1419,13 +1567,23 @@ async function safeExecuteActions(actions, wait = true, timeout = batchTimeoutMs
           downstreamAccepted = true;
           if (toolCall.name === "play_card") combatSafety.cardsPlayed += 1;
           if (toolCall.name === "end_turn" && wait) {
+            const started = Date.now();
             state = await waitForEndTurnSettlement(
               { floor: state.floor, turn: beforeTurn },
               { timeout },
             );
+            const pacingRemaining = visualDelayForAction(toolCall.name) - (Date.now() - started);
+            if (pacingRemaining > 0) {
+              await sleep(Math.min(pacingRemaining, Math.max(0, timeout - (Date.now() - started))));
+            }
             settledByDedicatedWait = true;
           } else if (toolCall.name === "choose" && state.screen_type === "HAND_SELECT") {
+            const started = Date.now();
             state = await waitForHandSelectionChoiceSettlement(state, { timeout });
+            const pacingRemaining = visualDelayForAction(toolCall.name) - (Date.now() - started);
+            if (wait && pacingRemaining > 0) {
+              await sleep(Math.min(pacingRemaining, Math.max(0, timeout - (Date.now() - started))));
+            }
             settledByDedicatedWait = true;
           }
         } else {
@@ -1435,13 +1593,15 @@ async function safeExecuteActions(actions, wait = true, timeout = batchTimeoutMs
       }
 
       if (!settledByDedicatedWait) {
-        await sleep(settleMs);
-        state = await decisionState({ timeout });
-      }
-      if (wait && action.action !== "wait") {
-        state = await waitForVisualSettlement(toolCall?.name ?? action.action, state, {
-          readState: () => decisionState({ timeout }),
-        });
+        if (action.action === "wait") {
+          state = await decisionState({ timeout });
+        } else {
+          const settled = await waitForActionSettlement(action, state, {
+            timeout,
+            waitForVisual: wait,
+          });
+          state = settled.state;
+        }
       }
       syncCombatSafety(state);
     } catch (error) {
@@ -1481,7 +1641,12 @@ async function safeExecuteActions(actions, wait = true, timeout = batchTimeoutMs
     }
   }
 
-  return rememberAndCompact(state, false, { action: "act_many", completed: normalizedActions.length });
+  return rememberAndCompact(state, false, {
+    action: "act_many",
+    completed: normalizedActions.length,
+    settlement: "verified",
+    timeout_ms: timeout,
+  });
 }
 
 async function callAndSettle(name, args = {}, wait = true, timeout = timeoutMs) {
@@ -1561,6 +1726,15 @@ async function runSafetySelfTests() {
     throw new Error(`Self-test failed: ${label} did not throw`);
   };
 
+  const expectReject = async (label, fn) => {
+    try {
+      await fn();
+    } catch (error) {
+      return error;
+    }
+    throw new Error(`Self-test failed: ${label} did not reject`);
+  };
+
   let observedVisualDelay = -1;
   let visualRefreshes = 0;
   const visuallySettled = await waitForVisualSettlement(
@@ -1579,6 +1753,76 @@ async function runSafetySelfTests() {
   const nonVisualState = { marker: "unchanged" };
   if (await waitForVisualSettlement("get_state", nonVisualState) !== nonVisualState) {
     throw new Error("Self-test failed: read-only state call received an unnecessary visual delay");
+  }
+
+  const actionStart = {
+    floor: 8,
+    room_phase: "COMBAT",
+    screen_type: "NONE",
+    current_energy: 3,
+    combat_detail: { turn: 2, draw_count: 5, discard_count: 0, exhaust_count: 0, limbo_count: 0 },
+    hand: [
+      { id: "Shiv", name: "小刀", uuid: "shiv-1", cost: 0 },
+      { id: "Shiv", name: "小刀", uuid: "shiv-2", cost: 0 },
+    ],
+    monsters: [{ id: "A", name: "A", current_hp: 20, block: 0, is_gone: false, intent: "ATTACK" }],
+  };
+  const actionAfter = {
+    ...actionStart,
+    hand: actionStart.hand.slice(1),
+    combat_detail: { ...actionStart.combat_detail, discard_count: 1 },
+    monsters: [{ ...actionStart.monsters[0], current_hp: 16 }],
+  };
+  if (actionSettlementEvidence(
+    { action: "play_card", card_name: "小刀", target_index: 1 },
+    actionStart,
+    actionStart,
+  )) {
+    throw new Error("Self-test failed: an unchanged action state was treated as settled");
+  }
+  if (actionSettlementEvidence(
+    { action: "play_card", card_name: "小刀", target_index: 1 },
+    actionStart,
+    actionAfter,
+  ) !== "card_left_hand") {
+    throw new Error("Self-test failed: an exact duplicate card instance leaving hand was not detected");
+  }
+
+  let virtualNow = 0;
+  let actionReads = 0;
+  const verifiedAction = await waitForActionSettlement(
+    { action: "play_card", card_name: "小刀", target_index: 1 },
+    actionStart,
+    {
+      timeout: 2000,
+      now: () => virtualNow,
+      pause: async (delay) => { virtualNow += delay; },
+      readState: async () => {
+        actionReads += 1;
+        return actionReads < 2 ? actionStart : actionAfter;
+      },
+    },
+  );
+  if (actionReads !== 2 || verifiedAction.evidence !== "card_left_hand" || virtualNow !== visualSettleMs) {
+    throw new Error("Self-test failed: action verification did not poll until evidence and honor visual pacing");
+  }
+
+  virtualNow = 0;
+  const settlementTimeout = await expectReject(
+    "action verification has one fixed deadline",
+    () => waitForActionSettlement(
+      { action: "play_card", card_name: "小刀", target_index: 1 },
+      actionStart,
+      {
+        timeout: 400,
+        now: () => virtualNow,
+        pause: async (delay) => { virtualNow += delay; },
+        readState: async () => actionStart,
+      },
+    ),
+  );
+  if (settlementTimeout.code !== "ACTION_SETTLEMENT_TIMEOUT" || virtualNow !== 400) {
+    throw new Error("Self-test failed: action verification timeout was not classified at its shared deadline");
   }
 
   combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
@@ -1906,7 +2150,9 @@ async function runSafetySelfTests() {
     { hand: [{ n: "打击", c: 1 }, { n: "防御", c: 1 }] },
     { hand: [{ n: "防御", c: 1 }] },
   );
-  if (semanticHandDelta.hand.removed?.[0]?.n !== "打击" || semanticHandDelta.hand.added) {
+  if (semanticHandDelta.hand.count !== 1
+      || semanticHandDelta.hand.removed?.[0]?.n !== "打击"
+      || semanticHandDelta.hand.added) {
     throw new Error("Self-test failed: hand delta was not semantic");
   }
 
@@ -1916,6 +2162,7 @@ async function runSafetySelfTests() {
   );
   if (scaledHandDelta.hand.changed?.[0]?.key !== "Strike_R@0"
       || scaledHandDelta.hand.changed[0].d !== 12
+      || scaledHandDelta.hand.count !== 2
       || scaledHandDelta.hand.removed
       || scaledHandDelta.hand.added) {
     throw new Error("Self-test failed: hand stat update was expanded into remove/add churn");
@@ -1927,9 +2174,43 @@ async function runSafetySelfTests() {
   );
   if (duplicateHandDelta.hand.changed?.length !== 1
       || duplicateHandDelta.hand.changed[0].c !== 0
+      || duplicateHandDelta.hand.count !== 2
       || duplicateHandDelta.hand.removed
       || duplicateHandDelta.hand.added) {
     throw new Error("Self-test failed: duplicate hand refs did not preserve an in-place stat update");
+  }
+
+  const shiv = { n: "小刀", ref: "Shiv@0", c: 0, d: 4, t: true, x: true };
+  const threeShivsAdded = diffValue(
+    { hand: [] },
+    { hand: [shiv, shiv, shiv] },
+  );
+  if (threeShivsAdded.hand.count !== 3 || threeShivsAdded.hand.added?.length !== 3) {
+    throw new Error("Self-test failed: three identical added cards lost their multiplicity");
+  }
+  const threeShivsRemoved = diffValue(
+    { hand: [shiv, shiv, shiv] },
+    { hand: [] },
+  );
+  if (threeShivsRemoved.hand.count !== 0 || threeShivsRemoved.hand.removed?.length !== 3) {
+    throw new Error("Self-test failed: three identical removed cards lost their multiplicity");
+  }
+  const twoMoreShivsAdded = diffValue(
+    { hand: [shiv] },
+    { hand: [shiv, shiv, shiv] },
+  );
+  if (twoMoreShivsAdded.hand.count !== 3 || twoMoreShivsAdded.hand.added?.length !== 2) {
+    throw new Error("Self-test failed: identical hand additions did not preserve the existing copy");
+  }
+  const emptyCompactHand = compactState({
+    ready_for_command: true,
+    room_phase: "COMBAT",
+    screen_type: "NONE",
+    hand: [],
+    combat_detail: { turn: 2, draw_count: 0, discard_count: 5, exhaust_count: 3 },
+  });
+  if (!Array.isArray(emptyCompactHand.hand) || emptyCompactHand.hand.length !== 0) {
+    throw new Error("Self-test failed: an empty live hand was omitted from compact state");
   }
 
   const targetAdjustedDamage = compactState({
@@ -1983,10 +2264,10 @@ async function runSafetySelfTests() {
   if (failedBatchReceipt(
     [{ action: "end_turn" }],
     0,
-    new Error("settlement timed out"),
+    makeSettlementTimeout({ action: "end_turn" }, 20000, endTurnState),
     true,
-  ).failed_action_status !== "outcome_uncertain") {
-    throw new Error("Self-test failed: an accepted action with failed settlement was reported as not executed");
+  ).failed_action_status !== "timeout_unknown") {
+    throw new Error("Self-test failed: an accepted action with expired verification was not reported as timeout_unknown");
   }
 
   const runDelta = compactRunDelta(
@@ -2120,7 +2401,7 @@ async function runSafetySelfTests() {
   combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
   turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
   advisoryKeys = new Set();
-  process.stdout.write("Self-tests passed: safety guards, contextual advisories, stable combat state, transient reward, event and hand-selection reads, 1-based choices, act-aware map graph, semantic delta, and run changes\n");
+  process.stdout.write("Self-tests passed: safety guards, per-action deadlines, contextual advisories, stable combat state, transient reward, event and hand-selection reads, 1-based choices, act-aware map graph, semantic delta, and run changes\n");
 }
 
 function runSyntheticBenchmark() {
@@ -2316,7 +2597,7 @@ const PLUGIN_TOOLS = [
   },
   {
     name: "act_many",
-    description: "Execute a short safe sequence serially and return settled semantic changes. Each choice_text or choice_uuid is re-resolved against fresh state; stops if the turn or enemy roster changes. A later failure returns a halted receipt with completed, failed, and remaining actions plus refreshed state. Send lethal targeted attacks separately.",
+    description: "Execute a short safe sequence serially and return settled semantic changes. Every action is polled against one shared per-action deadline and must expose an observable result before the next action starts. Each choice_text or choice_uuid is re-resolved against fresh state; stops if the turn or enemy roster changes. Failures distinguish action_error, verification_error, and verification_timeout; uncertain accepted actions are never resent. Send lethal targeted attacks separately.",
     inputSchema: {
       type: "object",
       properties: {

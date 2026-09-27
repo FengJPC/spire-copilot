@@ -14,8 +14,10 @@ The plugin exposes four MCP tools:
   failed, and remaining actions together with the refreshed game state.
 
 Both action tools accept an optional `timeout_ms` settlement limit.
-`act_many` defaults to 45 seconds while single actions retain the 20-second
-default; accepted actions are never retried after an uncertain response.
+`act_many` gives each action one shared 20-second verification deadline and
+polls until an observable result appears; single actions also retain the
+20-second default. Accepted actions that cannot be verified before the deadline
+return `timeout_unknown` and are never resent.
 
 Choice screens expose consistent 1-based indices plus stable card identities.
 Use `choice_text` for unique names or `choice_uuid` for an exact card instance;
@@ -28,10 +30,14 @@ reported explicitly. Card effects are emitted once in `card_defs`, newly seen
 cards arrive in `card_defs_added`, and later choices retain only stable refs and
 live values. Stance and debuff changes update matching hand refs in place rather
 than resending whole cards. Target-only modifiers add `ed`, a compact estimated
-damage-per-hit value for the affected enemy or enemies. Every mutating action
-also receives animation-aware pacing and a final refreshed state read, so a
-logical `ready_for_command` frame cannot make a batch outrun visible card and
-stance effects. Transient combat frames with incomplete data are filtered.
+damage-per-hit value for the affected enemy or enemies. Batched actions poll a
+fresh state until an observable result appears and also retain minimum
+animation-aware pacing, so a logical `ready_for_command` frame cannot make a
+batch outrun visible card and stance effects. Transient combat frames with
+incomplete data are filtered.
+Semantic hand changes preserve repeated identical cards and include the
+absolute post-change `count`, allowing clients to verify hand size without a
+second full-state request.
 Compact reads and action receipts also emit deduplicated `advisories` when a
 relevant special mechanic first appears, including supported boss openings,
 per-hit retaliation, Normality, unsafe Wrath turns, and Coffee Dripper at Rest

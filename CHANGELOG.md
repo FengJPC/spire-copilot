@@ -2,6 +2,31 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.15] - 2026-09-27
+
+### Fixed
+
+- Preserve the multiplicity of identical cards in semantic hand deltas and add
+  the absolute post-change `count` as a compact consistency check.
+- Keep an explicitly empty live hand in compact state so the final copies of a
+  repeated card produce a complete removal delta instead of a bare `null`.
+- Add regressions for adding three identical Shivs, removing all three, and
+  adding two copies while one identical Shiv is already present.
+
+## [0.2.14] - 2026-09-27
+
+### Changed
+
+- Verify every `act_many` step by polling for an observable action result under
+  one 20-second per-action deadline. Successful verification returns as soon as
+  the result and minimum animation pacing are satisfied instead of performing
+  two independently timed full-state reads.
+- Classify batch failures as `action_error`, `verification_error`, or
+  `verification_timeout`; a command accepted before timeout is reported as
+  `timeout_unknown` and is never resent.
+- Avoid a second long refresh after an expired verification deadline. Explicit
+  non-timeout errors receive only one bounded five-second recovery read.
+
 ## [0.2.13] - 2026-09-27
 
 ### Added

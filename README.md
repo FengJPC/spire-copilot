@@ -9,6 +9,8 @@ Slay the Spire run. It adds a compact, safety-aware bridge in front of the
 - One-time run context plus semantic state deltas to reduce context usage.
 - In-place hand-stat deltas for stance, Weak, and other live value changes,
   avoiding remove-and-add churn for cards that remain in hand.
+- Multiplicity-safe repeated-card deltas with an absolute post-change hand
+  count, so generated Shivs and similar cards cannot collapse into one entry.
 - Target-adjusted per-hit damage estimates only when enemy Vulnerable, Slow,
   Flight, or Intangible changes the displayed card damage.
 - One-time card-effect definitions with incremental definitions for newly seen
@@ -74,11 +76,16 @@ Optional timing variables:
 - `STS_SETTLE_MS` (default `250`)
 - `STS_VISUAL_SETTLE_MS` (default `600`)
 - `STS_WAIT_TIMEOUT_MS` (default `20000`)
-- `STS_BATCH_TIMEOUT_MS` (default `45000`)
+- `STS_BATCH_TIMEOUT_MS` (default `20000`, applied once per batched action)
 
 `act` and `act_many` also accept a per-call `timeout_ms` override from
 1,000 to 120,000 milliseconds. This changes settlement waiting only; it never
 causes an uncertain action to be resent.
+
+For `act_many`, the timeout is one deadline per action. The runtime polls every
+180 ms by default and immediately continues once the action exposes an
+observable result and its minimum animation pacing has elapsed. Explicit MCP
+errors, verification errors, and verification timeouts are reported separately.
 
 Development checks:
 
