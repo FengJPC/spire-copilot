@@ -15,6 +15,9 @@ Slay the Spire run. It adds a compact, safety-aware bridge in front of the
   Flight, or Intangible changes the displayed card damage.
 - One-time card-effect definitions with incremental definitions for newly seen
   cards, plus an `inspect_card` lookup for targeted verification.
+- On-demand `inspect_pile` composition queries for draw, discard, and exhaust
+  piles, preserving quantities and live variants without exposing draw order
+  or expanding ordinary state receipts beyond pile counts.
 - Screen-aware GRID compaction that keeps stable identities and live values
   without repeating every full card object.
 - Settled action responses that wait for animations and turn transitions.

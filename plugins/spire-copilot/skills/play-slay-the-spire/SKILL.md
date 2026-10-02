@@ -12,6 +12,7 @@ Use the `spire_copilot` tools for live state and actions.
 1. Call `get_state` with `mode: compact` before the first action and after any user-reported mismatch. Treat live state and explicit corrections as authoritative; all indices are 1-based.
 2. Apply any `advisories` before choosing actions. They are context-sensitive and normally emitted once when a mechanic first matters.
 3. Use `inspect_card` when an effect is missing, unfamiliar, modified, or worth verifying. Prefer an exact `choice_uuid`, otherwise `card_id` plus upgrades; do not request full state just to inspect one card.
+   Use `inspect_pile` with `pile: draw`, `discard`, or `exhaust` only when composition matters for draw, recovery, or cycle planning. It is unordered, not a prediction of the next draw; pile stats may change on entering hand.
 4. Use `card_name` for the cheapest playable same-effect copy, or `card` with a hand `k` for an exact copy; Copilot handles instance matching and reindexing. Prefer `act`; use `act_many` only for short sequences with stable turns, targets, and choices.
 5. Trust settled action receipts and `changes`. Never replay completed actions or an uncertain `end_turn`; read state after ambiguity. Send known-lethal targeted attacks separately before targeting remaining enemies.
 6. Resolve changing card choices by `choice_uuid` or unique `choice_text`; shops require `choice_text`. Never spend, buy, remove, or choose rewards from stale state.

@@ -2,6 +2,23 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.17] - 2026-10-02
+
+### Added
+
+- Add read-only `inspect_pile` for current draw, discard, and exhaust piles.
+  Compact groups preserve multiplicity, upgrades, costs, and live stat variants;
+  effect definitions reuse the existing cache and only queried pending refs are
+  emitted. Normal state/action receipts still carry pile counts only.
+- Canonically sort pile groups and their new definitions without exposing the
+  game's internal draw order, UUIDs, hand handles, or playable indices.
+- Distinguish empty piles from unavailable data or non-combat states and flag
+  unknown definitions. Inspection does not advance hand/delta baselines or
+  consume run/map/advisory changes.
+- Document on-demand use and snapshot-value limitations; add regression and
+  stdio/HTTP integration checks for all piles, repeated/variant cards, hidden
+  order, cached effects, invalid arguments, and unchanged action safety.
+
 ## [0.2.16] - 2026-10-02
 
 ### Fixed

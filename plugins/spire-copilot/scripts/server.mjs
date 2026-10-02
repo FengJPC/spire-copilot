@@ -2,7 +2,7 @@
 
 import readline from "node:readline";
 
-const pluginVersion = "0.2.16";
+const pluginVersion = "0.2.17";
 const endpoint = process.env.STS_MCP_URL ?? "http://127.0.0.1:8080/mcp";
 const accept = "application/json, text/event-stream";
 const pollMs = Number(process.env.STS_POLL_MS ?? 180);
@@ -343,10 +343,11 @@ async function enrichCardDefinitions(state) {
   return state;
 }
 
-function pendingCardDefinitionPayload() {
+function pendingCardDefinitionPayload(refs = undefined) {
   const pending = [...cardCatalog.definitions.entries()]
-    .filter(([ref]) => !cardCatalog.emittedRefs.has(ref));
+    .filter(([ref]) => !cardCatalog.emittedRefs.has(ref) && (!refs || refs.has(ref)));
   if (!pending.length) return {};
+  if (refs) pending.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
   const field = cardCatalog.catalogPayloadSent ? "card_defs_added" : "card_defs";
   for (const [ref] of pending) cardCatalog.emittedRefs.add(ref);
   cardCatalog.catalogPayloadSent = true;
@@ -400,7 +401,7 @@ async function waitUntilReady({ timeout = timeoutMs, readScreen = screenState, p
   } while (true);
 }
 
-async function enrichRunAndCombat(state) {
+async function enrichRunAndCombat(state, { includePiles = false } = {}) {
   if (!state.in_game) return state;
   if (state.floor === 0 && mapCache.act !== null) {
     resetMapCache();
@@ -427,6 +428,11 @@ async function enrichRunAndCombat(state) {
   if (!combat) return next;
   const enriched = {
     ...next,
+    ...(includePiles ? { _combat_piles: {
+      draw: combat.draw_pile,
+      discard: combat.discard_pile,
+      exhaust: combat.exhaust_pile,
+    } } : {}),
     hand: combat.hand ?? state.hand,
     monsters: combat.monsters ?? state.monsters,
     combat_detail: {
@@ -508,12 +514,12 @@ function carryForwardSameTurnIntents(state, previous = lastStableDecisionState) 
   return changed ? { ...state, monsters } : state;
 }
 
-async function decisionState({ timeout = timeoutMs } = {}) {
+async function decisionState({ timeout = timeoutMs, includePiles = false } = {}) {
   const started = Date.now();
   let state;
   do {
     state = await waitUntilReady({ timeout: Math.max(1, timeout - (Date.now() - started)) });
-    state = await enrichRunAndCombat(state);
+    state = await enrichRunAndCombat(state, { includePiles });
     state = carryForwardSameTurnIntents(state);
     if (isStableDecisionState(state)) break;
     if (Date.now() - started >= timeout) {
@@ -1863,6 +1869,39 @@ async function runSafetySelfTests() {
     throw new Error(`Self-test failed: ${label} did not reject`);
   };
 
+  for (const pile of ["draw", "discard", "exhaust"]) validatePileInspectionArgs({ pile });
+  expectThrow("pile inspection requires a pile", () => validatePileInspectionArgs({}));
+  expectThrow("pile inspection rejects unknown piles", () => validatePileInspectionArgs({ pile: "hand" }));
+  expectThrow("pile inspection cannot request hidden order", () => validatePileInspectionArgs({ pile: "draw", order: true }));
+  const pileCopies = [
+    { id: "Strike_P", name: "打击", uuid: "secret-1", cost: 1, damage: 6, is_playable: false },
+    { id: "Strike_P", name: "打击", uuid: "secret-2", cost: 1, damage: 6 },
+    { id: "Strike_P", name: "打击", uuid: "secret-3", cost: 0, damage: 6 },
+    { id: "Strike_P", name: "打击+", uuid: "secret-4", cost: 1, damage: 9, upgrades: 1 },
+    { id: "ModCard", name: "Mod", uuid: "secret-5", cost: 1, type: "SKILL", description: "Unknown effect" },
+  ];
+  const handleCount = handHandles.next;
+  const pileGroups = compactPileCards(pileCopies);
+  if (pileGroups.length !== 4 || pileGroups.reduce((n, card) => n + card.qty, 0) !== 5
+      || pileGroups.find((card) => card.n === "打击" && card.c === 1)?.qty !== 2
+      || !pileGroups.some((card) => card.ref === "Strike_P@1" && card.d === 9)
+      || !pileGroups.some((card) => card.ref === "ModCard@0" && card.text === "Unknown effect")
+      || JSON.stringify(pileGroups) !== JSON.stringify(compactPileCards([...pileCopies].reverse()))
+      || pileGroups.some((card) => ["uuid", "k", "i", "p"].some((field) => field in card))
+      || handHandles.next !== handleCount || compactPileCards([]).length !== 0) {
+    throw new Error("Self-test failed: pile composition lost multiplicity/variants or exposed order/hand slots");
+  }
+  cardCatalog.definitions.set("Z@0", { id: "Z", n: "Z" });
+  cardCatalog.definitions.set("A@0", { id: "A", n: "A" });
+  cardCatalog.definitions.set("Other@0", { id: "Other", n: "Other" });
+  const queriedDefinitions = pendingCardDefinitionPayload(new Set(["Z@0", "A@0"]));
+  if (JSON.stringify(Object.keys(queriedDefinitions.card_defs)) !== '["A@0","Z@0"]'
+      || cardCatalog.emittedRefs.has("Other@0")
+      || !pendingCardDefinitionPayload().card_defs_added?.["Other@0"]) {
+    throw new Error("Self-test failed: pile definitions exposed traversal order or consumed unqueried refs");
+  }
+  resetCardCatalog();
+
   const copyState = {
     floor: 50, room_phase: "COMBAT", current_energy: 1,
     combat_detail: { turn: 3 },
@@ -2604,7 +2643,7 @@ async function runSafetySelfTests() {
   combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
   turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
   advisoryKeys = new Set();
-  process.stdout.write("Self-tests passed: safety guards, per-action deadlines, contextual advisories, stable combat state, transient reward, event and hand-selection reads, 1-based choices, act-aware map graph, semantic delta, and run changes\n");
+  process.stdout.write("Self-tests passed: safety guards, per-action deadlines, contextual advisories, stable combat state, transient reward, event and hand-selection reads, 1-based choices, act-aware map graph, semantic delta, on-demand unordered piles, and run changes\n");
 }
 
 function runSyntheticBenchmark() {
@@ -2765,6 +2804,17 @@ const PLUGIN_TOOLS = [
     inputSchema: {
       type: "object",
       properties: { mode: { type: "string", enum: ["compact", "delta", "full"], default: "compact" } },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: "inspect_pile",
+    description: "Read current draw, discard, or exhaust pile on demand. Returns unordered compact card groups with qty, upgrades and current instance stats, reusing cached definitions. No draw order, UUIDs or hand indices. Pile stats do not promise values after drawing. Does not advance the hand/delta baseline.",
+    inputSchema: {
+      type: "object",
+      properties: { pile: { type: "string", enum: ["draw", "discard", "exhaust"] } },
+      required: ["pile"],
       additionalProperties: false,
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
@@ -2938,6 +2988,70 @@ async function inspectCard(args = {}) {
   };
 }
 
+function validatePileInspectionArgs(args) {
+  if (!args || Object.keys(args).some((key) => key !== "pile")
+      || !["draw", "discard", "exhaust"].includes(args.pile)) {
+    throw new Error("inspect_pile requires pile: draw, discard, or exhaust; no other arguments");
+  }
+}
+
+function compactPileCards(cards) {
+  const groups = new Map();
+  for (const card of cards) {
+    const ref = cardRef(card);
+    const definition = cardCatalog.definitions.get(ref);
+    const text = normalizeCardText(card.description);
+    // Do not use compactCard: its UUID-derived handle allocation would reveal
+    // internal pile order. Pile cards are composition, not playable hand slots.
+    const value = {
+      ...(ref ? { ref } : {}),
+      n: card.name ?? card.id,
+      ...(Number.isFinite(card.cost) ? { c: card.cost } : {}),
+      ...(Number.isFinite(card.damage) && card.damage >= 0 ? { d: card.damage } : {}),
+      ...(Number.isFinite(card.block) && card.block >= 0 ? { b: card.block } : {}),
+      ...(Number.isFinite(card.magic_number) ? { m: card.magic_number } : {}),
+      ...(cardUpgradeCount(card) ? { u: cardUpgradeCount(card) } : {}),
+      ...(card.exhausts ? { x: true } : {}),
+      ...(card.has_target ? { t: true } : {}),
+      ...(card.ethereal ? { ethereal: true } : {}),
+      ...(card.self_retain ? { retain: true } : {}),
+      ...(!definition && card.type ? { type: card.type } : {}),
+      ...(text && text !== definition?.text ? { text } : {}),
+    };
+    for (const field of ["base_damage", "base_block", "base_magic_number", "heal", "draw", "discard", "misc"]) {
+      if (Number.isFinite(card[field])) value[field] = card[field];
+    }
+    const signature = JSON.stringify(value);
+    const group = groups.get(signature);
+    if (group) group.qty++;
+    else groups.set(signature, { ...value, qty: 1 });
+  }
+  // Canonical presentation is invariant under every internal pile permutation.
+  return [...groups.entries()].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+    .map(([, group]) => group);
+}
+
+async function inspectPile(args = {}) {
+  validatePileInspectionArgs(args);
+  const state = await decisionState({ includePiles: true });
+  const context = { pile: args.pile, floor: state.floor, turn: state.combat_detail?.turn };
+  if (!state.in_game || state.room_phase !== "COMBAT") {
+    return { status: "NOT_IN_COMBAT", ...context };
+  }
+  const cards = state._combat_piles?.[args.pile];
+  if (!Array.isArray(cards) || cards.some((card) => !card || typeof card !== "object")) {
+    return { status: "UNAVAILABLE", ...context,
+      reason: "Downstream did not provide a complete pile; do not treat this as empty" };
+  }
+  const refs = new Set(cards.map(cardRef).filter(Boolean));
+  const missing = [...refs].filter((ref) => !cardCatalog.definitions.has(ref)).sort();
+  // Read-only inspection must not replace previousState/observedHandState or
+  // consume run/map/advisory deltas which have not yet been sent to the caller.
+  return { status: "ok", ...context, order: "unordered", count: cards.length,
+    cards: compactPileCards(cards), ...pendingCardDefinitionPayload(refs),
+    ...(missing.length ? { definitions_unavailable: missing } : {}) };
+}
+
 async function readPluginState(mode) {
   const read = async () => {
     const state = await decisionState();
@@ -2955,6 +3069,7 @@ async function readPluginState(mode) {
 
 async function dispatchPluginTool(name, args = {}) {
   if (name === "get_state") return readPluginState(args.mode ?? "compact");
+  if (name === "inspect_pile") return inspectPile(args);
   if (name === "inspect_card") return inspectCard(args);
   if (name === "act") {
     const { action, wait = true, timeout_ms = timeoutMs, ...actionArgs } = args;

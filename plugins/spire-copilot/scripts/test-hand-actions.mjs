@@ -11,9 +11,9 @@ const body = (i, cost = 0) => ({ id: "EmptyBody", name: "化体为空", uuid: uu
   type: "SKILL", cost, block: 7, is_playable: true });
 const strike = (i) => ({ id: "Strike_P", name: "打击", uuid: uuid(i),
   type: "ATTACK", cost: 0, damage: 6, has_target: true });
-let state, sent, failAction, noEffect, changeTurn;
+let state, sent, failAction, noEffect, changeTurn, pileData;
 function reset(hand) {
-  sent = []; failAction = false; noEffect = false; changeTurn = false;
+  sent = []; failAction = false; noEffect = false; changeTurn = false; pileData = null;
   state = { in_game: true, ready_for_command: true, floor: 50,
     room_type: "MonsterRoomBoss", room_phase: "COMBAT", screen_type: "NONE",
     current_energy: 3, max_energy: 3, current_hp: 74, max_hp: 74, hand,
@@ -37,8 +37,17 @@ const server = http.createServer(async (req, res) => {
     if (message.method === "tools/call") {
       const { name, arguments: args = {} } = message.params;
       if (name === "get_screen_state") value = result(state);
-      else if (name === "get_game_state") value = result({ game_state: null });
-      else if (name === "get_card_info") value = result({ cards: [] });
+      else if (name === "get_game_state") value = result({ game_state: pileData ? {
+        class: "WATCHER", act: 3, deck: [], relics: [], potions: [],
+        combat_state: { turn: state.combat_detail.turn, player: state.combat_detail.player,
+          hand: state.hand, monsters: state.monsters, ...pileData },
+      } : null });
+      else if (name === "get_card_info") value = result({ cards: pileData ? [
+        { id: "PileAttack", name: "Pile Attack", type: "ATTACK", cost: 1, base_damage: 6,
+          description: "Deal !D! damage.", upgraded: { name: "Pile Attack+", base_damage: 9 } },
+        { id: "PileGuard", name: "Pile Guard", type: "SKILL", cost: 1, base_block: 5,
+          description: "Gain !B! Block." },
+      ] : [] });
       else if (name === "execute_actions") {
         assert.equal(args.actions.length, 1, "Copilot must settle one backend action at a time");
         const action = args.actions[0];
@@ -86,7 +95,7 @@ lines.on("line", (line) => {
   if (!entry) return;
   clearTimeout(entry.timer); pending.delete(response.id); entry.resolve(response);
 });
-async function call(name, args = {}) {
+async function call(name, args = {}, expectError = false) {
   const id = nextId++;
   const response = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`RPC timeout: ${name}; ${errors}`)), 5000);
@@ -95,7 +104,7 @@ async function call(name, args = {}) {
       params: { name, arguments: args } })}\n`);
   });
   assert.equal(response.error, undefined);
-  assert.equal(response.result.isError, undefined, JSON.stringify(response));
+  assert.equal(response.result.isError, expectError ? true : undefined, JSON.stringify(response));
   return JSON.parse(response.result.content[0].text);
 }
 try {
@@ -157,7 +166,68 @@ try {
     { action: "play_card", card_index: 1 }, { action: "play_card", card_index: 2 },
   ] });
   assert.equal(newTurn.halted, true); assert.equal(sent.length, 1);
-  console.log("Integration tests passed: cheapest copy, exact handles, observed indices, reorders, cost/gone guards, partial failure, no auto-end/retry, timeout and turn change.");
+
+  reset([body(1), strike(3), body(2)]);
+  const observed = await call("get_state");
+  const pileAttack = (i, extra = {}) => ({ id: "PileAttack", name: "Pile Attack", uuid: uuid(i),
+    type: "ATTACK", cost: 1, damage: 6, is_playable: false, ...extra });
+  pileData = { draw_pile: [pileAttack(10), pileAttack(11), pileAttack(12, { cost: 0 }),
+    pileAttack(13, { name: "Pile Attack+", damage: 9, upgrades: 1 })],
+    discard_pile: [{ id: "PileGuard", name: "Pile Guard", uuid: uuid(20), cost: 1, block: 5 }],
+    exhaust_pile: [] };
+  state.hand.reverse();
+  const inspected = await call("inspect_pile", { pile: "draw" });
+  assert.equal(inspected.status, "ok"); assert.equal(inspected.order, "unordered");
+  assert.equal(inspected.floor, 50); assert.equal(inspected.turn, 1);
+  assert.equal(inspected.count, 4); assert.equal(inspected.cards.length, 3);
+  assert.equal(inspected.cards.find((card) => card.c === 1 && !card.u).qty, 2);
+  assert.equal(inspected.cards.find((card) => card.u === 1).d, 9);
+  const definitions = inspected.card_defs_added ?? inspected.card_defs;
+  assert.equal(definitions["PileAttack@0"].text, "Deal !D! damage.");
+  assert.equal(definitions["PileAttack@1"].d, 9);
+  assert.equal(definitions["PileGuard@0"], undefined, "only queried pile definitions should be emitted");
+  for (const card of inspected.cards) {
+    for (const hidden of ["uuid", "k", "i", "p", "playable"]) assert.equal(card[hidden], undefined);
+  }
+  assert.equal(sent.length, 0, "inspection must never execute gameplay actions");
+  pileData.draw_pile.reverse();
+  const reversed = await call("inspect_pile", { pile: "draw" });
+  assert.deepEqual(reversed.cards, inspected.cards);
+  assert.equal(reversed.card_defs, undefined); assert.equal(reversed.card_defs_added, undefined);
+  const discard = await call("inspect_pile", { pile: "discard" });
+  assert.equal(discard.count, 1); assert.equal(discard.cards[0].b, 5);
+  assert.equal(discard.card_defs_added["PileGuard@0"].text, "Gain !B! Block.");
+  const exhausted = await call("inspect_pile", { pile: "exhaust" });
+  assert.equal(exhausted.status, "ok"); assert.equal(exhausted.count, 0);
+  assert.deepEqual(exhausted.cards, []);
+  await call("act", { action: "play_card", card_index: 3 });
+  assert.equal(sent[0].card_uuid, uuid(2), "pile query must preserve the observed hand-index binding");
+
+  const baseline = await call("get_state"); state.current_energy--;
+  await call("inspect_pile", { pile: "draw" });
+  const afterInspection = await call("get_state", { mode: "delta" });
+  assert.equal(afterInspection.delta.energy, `${state.current_energy}/3`, "inspection must not swallow state deltas");
+  assert.ok(baseline.hand); assert.ok(observed.hand);
+  assert.equal(JSON.stringify(baseline).includes("draw_pile"), false);
+  assert.deepEqual(Object.keys(baseline.piles).sort(), ["discard", "draw", "exhaust"]);
+  assert.equal(typeof baseline.piles.draw, "number");
+
+  pileData.exhaust_pile = [{ id: "UnknownPileMod", name: "Unknown", uuid: uuid(30), cost: 2,
+    description: "Mod-specific effect", type: "SKILL", misc: 7 }];
+  const unknown = await call("inspect_pile", { pile: "exhaust" });
+  assert.deepEqual(unknown.definitions_unavailable, ["UnknownPileMod@0"]);
+  assert.equal(unknown.cards[0].text, "Mod-specific effect"); assert.equal(unknown.cards[0].misc, 7);
+  delete pileData.draw_pile;
+  const missing = await call("inspect_pile", { pile: "draw" });
+  assert.equal(missing.status, "UNAVAILABLE"); assert.equal(missing.count, undefined);
+  pileData = null;
+  assert.equal((await call("inspect_pile", { pile: "discard" })).status, "UNAVAILABLE");
+  state.room_phase = "COMPLETE";
+  assert.equal((await call("inspect_pile", { pile: "draw" })).status, "NOT_IN_COMBAT");
+  for (const args of [{}, { pile: "hand" }, { pile: "draw", order: true }]) {
+    assert.match((await call("inspect_pile", args, true)).error, /inspect_pile requires/);
+  }
+  console.log("Integration tests passed: hand identity and action guards; on-demand piles, variants/counts, order hiding, definitions, empty/unavailable piles, read-only queries and unchanged hand/delta baselines.");
 } finally {
   for (const entry of pending.values()) clearTimeout(entry.timer);
   child.stdin.end(); child.kill(); lines.close();

@@ -3,11 +3,14 @@
 This directory is the installable plugin package. The repository-level README
 contains requirements and installation instructions.
 
-The plugin exposes four MCP tools:
+The plugin exposes five MCP tools:
 
 - `get_state`: one-time run context, semantic delta, or diagnostic full state.
 - `inspect_card`: one exact card definition and any matching live instance
   values, without expanding the complete game state.
+- `inspect_pile`: on-demand composition of `draw`, `discard`, or `exhaust`,
+  grouped by equivalent live values with `qty` and cached effects. The list is
+  unordered, never actual draw order; unknown data is distinct from empty.
 - `act`: one settled, safety-checked action with a compact result and changes.
 - `act_many`: a short serial sequence that stops when the target set or turn
   changes. If a later action fails, its normal result identifies completed,
@@ -18,6 +21,12 @@ Both action tools accept an optional `timeout_ms` settlement limit.
 polls until an observable result appears; single actions also retain the
 20-second default. Accepted actions that cannot be verified before the deadline
 return `timeout_unknown` and are never resent.
+
+For example, `inspect_pile({"pile":"draw"})` returns the current draw-pile
+composition with floor/turn context. It exposes no UUIDs or hand indices and
+does not advance the hand/delta baseline. Query only when draw, recovery, or
+cycle planning needs it; normal compact states and receipts retain counts only.
+Pile costs and stats are snapshot values, not guaranteed after the next draw.
 
 Choice screens expose consistent 1-based indices plus stable card identities.
 Use `choice_text` for unique names or `choice_uuid` for an exact card instance;

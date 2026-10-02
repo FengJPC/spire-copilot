@@ -11,6 +11,14 @@ Read this reference only when compact fields are unclear, a state mismatch is re
 - Hand cards have a short instance handle `k` and their actual 1-based position `i`; `ref` identifies the shared effect definition, not a physical copy.
 - `hand.changed.key` identifies `k`; preserve omitted fields, remove by `removed[].k`, insert `added` cards, and order by `i`. Duplicate names and same-effect refs remain distinct.
 
+## On-demand piles
+
+- Call `inspect_pile` with `pile: "draw"`, `"discard"`, or `"exhaust"` when composition changes a decision; ordinary state still reports only pile counts.
+- The response gives `floor`, `turn`, total `count`, and unordered `cards` groups. `qty` is multiplicity; upgraded or numerically different copies remain separate. Names, effect `ref`s, and current instance stats reuse cached `card_defs`/`card_defs_added`; `inspect_card` remains available for a specific effect.
+- The display is canonically sorted, not the actual draw/discard order. No pile UUIDs, hand handles, or playable indices are exposed. Off-hand costs and stats describe the snapshot, not guaranteed values after drawing (e.g. Snecko rerolls costs).
+- `NOT_IN_COMBAT` or `UNAVAILABLE` is not an empty pile; only `status: "ok", count: 0, cards: []` confirms empty. `definitions_unavailable` flags missing effect definitions instead of inventing them.
+- Queries neither act nor replace the hand/delta baseline; any other state changes still arrive on the next state/action receipt. Refresh state before acting if the returned floor/turn no longer matches the observed hand.
+
 ## Settled actions
 
 - Action tools return a compact `result` receipt plus settled `changes`; these are authoritative.
