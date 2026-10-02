@@ -2,6 +2,29 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.19] - 2026-10-02
+
+### Changed
+
+- Split the runtime into explicit transport, state, cards, safety, settlement,
+  compaction, execution, inspection, and protocol domains, with a single
+  composition root and instance-owned configuration/session state.
+- Keep the stdio entry path, five MCP tools, environment variables, response
+  shapes, legacy `wait` alias, and all 0.2.18 execution-certainty safeguards.
+  This is a structural release, not a gameplay or transport behavior change.
+- Move embedded safety fixtures and the synthetic benchmark into test-only
+  modules loaded on demand; retain `server.mjs --self-test` and `--benchmark`.
+
+### Added
+
+- Runtime isolation tests for independent configuration, caches, hand identities,
+  local counts, and pending end-turn fences. Importing or constructing a runtime
+  and reading protocol metadata do not contact the game.
+- One `test-all.mjs` command for recursive syntax checks and all existing/new
+  regressions, runnable from any working directory without new dependencies.
+- Developer architecture notes covering domain responsibilities, composition,
+  session ownership, and the transport-reset/game-reset boundary.
+
 ## [0.2.18] - 2026-10-02
 
 ### Fixed

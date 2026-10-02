@@ -3,6 +3,12 @@
 This directory is the installable plugin package. The repository-level README
 contains requirements and installation instructions.
 
+The stdio entry remains `scripts/server.mjs`. Internals live in
+`scripts/runtime/`, assembled by `runtime/index.mjs`; fixtures in
+`scripts/tests/` load only for development checks. Run `node scripts/test-all.mjs`
+to validate the complete installed package. Runtime splitting does not change
+the five tools, game endpoint, settings, or 0.2.18 safety semantics.
+
 The plugin exposes five MCP tools:
 
 - `get_state`: one-time run context, semantic delta, or diagnostic full state.

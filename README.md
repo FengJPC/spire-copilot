@@ -98,11 +98,24 @@ reported separately. Only pre-send failures mean `not_executed`.
 Development checks:
 
 ```powershell
+node plugins/spire-copilot/scripts/test-all.mjs
+```
+
+The complete check includes syntax validation, safety self-tests, runtime
+isolation, HTTP/stdio integration, execution-certainty fault injection, and the
+synthetic byte benchmark. Individual checks remain available:
+
+```powershell
 node plugins/spire-copilot/scripts/server.mjs --self-test
+node plugins/spire-copilot/scripts/tests/runtime-isolation.mjs
 node plugins/spire-copilot/scripts/test-hand-actions.mjs
 node plugins/spire-copilot/scripts/test-execution-certainty.mjs
 node plugins/spire-copilot/scripts/server.mjs --benchmark
 ```
+
+See [runtime architecture](docs/runtime-architecture.md) for module boundaries
+and session ownership. The packaged entry remains `scripts/server.mjs`; no MCP
+configuration changes are needed after the modular refactor.
 
 The benchmark is a synthetic regression fixture for comparing response shapes;
 it is not presented as a real-run token reduction claim.
