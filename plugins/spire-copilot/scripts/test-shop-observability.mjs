@@ -55,7 +55,7 @@ const server = http.createServer(async (req, res) => {
           hand: state.hand, monsters: state.monsters, draw_pile: [], discard_pile: [], exhaust_pile: [] } } : {}),
       } });
       else if (name === "get_card_info") value = result({ cards: [
-        { id: "Eruption", name: "暴怒", cost: 0, type: "ATTACK" },
+        { id: "Eruption", name: "暴怒", cost: 0, type: "ATTACK", has_target: true },
         { id: "EmptyBody", name: "化体为空", cost: 1, type: "SKILL" },
       ].filter((item) => args.card_ids.includes(item.id)) });
       else if (name === "discard_potion") {
@@ -75,6 +75,7 @@ const server = http.createServer(async (req, res) => {
         const action = args.actions[0];
         const selected = state.hand.find((item) => item.uuid === action.card_uuid);
         assert.ok(selected, "must use exact game-thread UUID");
+        assert.equal(action.target_index, selected.has_target ? 1 : undefined, "target selection follows the live flag, not type");
         sent.push({ action: "play_card", id: selected.id });
         state.hand = state.hand.filter((item) => item !== selected);
         if (selected.id === "Eruption") { state.combat_detail.player.stance = "Wrath"; state.monsters[0].move.damage = 76; }
@@ -116,12 +117,16 @@ async function call(name, args = {}) {
 }
 try {
   const first = await call("get_state");
+  assert.ok(first.advisories.some((item) => item.id === "shop-choice"));
+  assert.ok(first.advisories.some((item) => item.id === "potion-slots"));
+  assert.ok(first.advisories.some((item) => item.id === "card-targeting"));
   assert.equal(first.choices[0].kind, "purge");
   assert.equal(first.choices[0].card_id, undefined);
   assert.equal(first.choices[1].card_id, "Affordable");
   assert.equal(first.choices[1].text.includes("迂回"), true);
   assert.equal(first.details.cards[0].id, "ReachHeaven");
   const reread = await call("get_state");
+  assert.equal(reread.advisories, undefined);
   assert.equal(reread.run_context, undefined);
   assert.equal(reread.potions.length, 3);
   assert.equal(reread.potions[2].empty, true);
@@ -136,6 +141,7 @@ try {
   assert.equal(bought.result.execution_certainty, "verified");
   assert.equal(sent[1].id, "Affordable");
   const afterPurchase = await call("get_state");
+  assert.equal(afterPurchase.advisories, undefined);
   assert.equal(afterPurchase.gold, 13);
   assert.equal(afterPurchase.choices.length, 1);
   assert.equal(afterPurchase.choices[0].card_id, "Free");
@@ -144,7 +150,8 @@ try {
 
   state = { in_game: true, ready_for_command: true, floor: 5, room_phase: "COMBAT",
     screen_type: "NONE", room_type: "MonsterRoom", current_hp: 50, max_hp: 50, current_energy: 3, max_energy: 3,
-    hand: [card("Eruption", "暴怒", 0), { ...card("EmptyBody", "化体为空", 0), cost: 3, type: "SKILL", is_playable: false }],
+    hand: [{ ...card("Eruption", "暴怒", 0), has_target: true },
+      { ...card("EmptyBody", "化体为空", 0), cost: 3, type: "SKILL", is_playable: false }],
     combat_detail: { turn: 1, player: { block: 0 } },
     monsters: [{ id: "Enemy", name: "Enemy", current_hp: 100, max_hp: 100, intent: "ATTACK", move: { damage: 38 },
       powers: [{ id: "Poison", amount: 2 }] }] };
@@ -156,6 +163,8 @@ try {
   assert.ok(combat.advisories.some((item) => item.id === "live-card-cost"));
   assert.ok(combat.advisories.some((item) => item.id === "hand-playability"));
   assert.equal(combat.hand[1].c, 3);
+  assert.equal(combat.hand[0].t, true);
+  assert.equal(combat.card_defs["Eruption@0"].target, true);
   assert.equal(combat.hand[1].p, false);
   assert.equal(combat.card_defs["EmptyBody@0"].c, 1);
   const inspected = await call("inspect_card", { card_id: "EmptyBody" });
@@ -182,7 +191,7 @@ try {
   assert.equal(Object.hasOwn(candidate.hand[1], "p"), false);
   assert.equal(candidate.advisories, undefined);
   assert.equal(sent.length, 2, "inspection and state checks never mutate the isolated game");
-  const wrath = await call("act", { action: "play_card", card_name: "暴怒" });
+  const wrath = await call("act", { action: "play_card", card_name: "暴怒", target_index: 1 });
   assert.equal(wrath.current.stance, "Wrath");
   assert.equal(wrath.changes.stance, "Wrath");
   assert.equal(wrath.changes.enemies.changed[0].atk, 76, "upstream already doubled intent; Copilot must not double twice");

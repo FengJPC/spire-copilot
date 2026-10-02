@@ -84,5 +84,17 @@ value; `p: null` clears the old negative marker. Other instance payloads use
 `playable: false`; pile queries deliberately expose neither playability marker.
 X/unplayable cost sentinels never replace live flags and action validation.
 
+Additional connection-scoped hints appear on the first card-bearing
+state/inspection (`card-targeting`), actionable shop (`shop-choice`), known
+potion inventory (`potion-slots`), or valid pile query (`pile-inspection`).
+They are attached to the response that first needs them, not repeated each
+turn/floor. Inspection hints do not consume state deltas or combat warnings.
+Card `t` (hand/choices/piles) and `target` (other instances/definitions) are
+positive-only single-enemy targeting markers, not playability. The normal
+upstream converter omits `has_target` for non-single-enemy modes; compression
+also hides false/missing flags. Supply a current `target_index` for targeted
+plays, never infer targeting from card type; inspect/refresh conflicting Mod
+effects. Delta omission retains `t`, while `t: null` clears it.
+
 The in-game `MCP The Spire` mod must remain enabled because it provides the
 downstream game endpoint.

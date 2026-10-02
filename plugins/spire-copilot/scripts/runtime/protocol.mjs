@@ -23,7 +23,7 @@ export function createProtocol({ config, session }, dependencies = {}) {
     card_name: { type: "string", description: "Selects the cheapest playable same-effect copy; use card with hand k for an exact copy." },
     card_id: { type: "string" },
     card_index: { type: "integer", minimum: 1 },
-    target_index: { type: "integer", minimum: 1 },
+    target_index: { type: "integer", minimum: 1, description: "Current enemy index. For play_card, supply when live t=true (target=true in other card payloads); do not infer targeting from card type. Targeted potions use requires_target." },
     choice_index: { type: "integer", minimum: 1 },
     choice_text: { type: "string" },
     choice_uuid: { type: "string" },

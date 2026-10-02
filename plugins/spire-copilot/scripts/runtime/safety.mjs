@@ -14,17 +14,50 @@ export function createSafety({ config, session }, dependencies = {}) {
 
   const NORMALITY_NAMES = new Set(["Normality", "凡庸"]);
 
+  const INTERFACE_ADVISORIES = {
+    "hand-playability": "In a full hand/choice snapshot, p=false means observed unplayable; omitted p is a candidate, not proof (upstream true and missing flags compress alike). In deltas, omitted p retains the old value; p=null clears the old negative marker. Other instance payloads use playable=false; inspect_pile exposes neither marker and cannot establish playability. c=-1 is X-cost (normally all current Energy); c=-2 is the unplayable marker, not negative spending. Special card/free-play effects may alter spending or permit play; check live flags/costs and runtime validation, never the sentinel alone.",
+    "card-targeting": "Card t=true (hand/choices/piles) or target=true (other instances/definitions) means play_card needs one enemy: supply the current 1-based target_index, never infer it from ATTACK vs SKILL. It does not apply to choosing a reward/card. Normal MCP The Spire omits has_target for other target modes, so full-snapshot omission normally needs no explicit enemy; compression also hides false/missing data. If Mod effects contradict the flag, inspect/refresh rather than guess. Delta omission retains t; t=null clears it. Definition/pile targeting is not live permission to play.",
+    "shop-choice": "Shop purchases use a unique choice_text from the latest choices, never a stale choice_index or card UUID. Choices are a filtered mixed-item list; details contain canonical item information, not matching positional indices. Identity enrichment is by unique name and price. Buying changes choices: refresh before the next purchase. Ambiguity must fail closed because spending is irreversible.",
+    "potion-slots": "Use current potions with 1-based slot for potion_slot, not an old run_delta or item ID; duplicate potions occupy distinct slots. null means unknown inventory, [] means zero slots, empty=true means an empty slot. Check live can_use/can_discard when supplied; requires_target=true needs current enemy target_index. Before making space for a reward, identify the exact occupied slot to discard and verify the refreshed inventory.",
+    "pile-inspection": "inspect_pile reports unordered composition, not draw order. qty counts equivalent copies; current off-hand stats may change when drawn. No UUIDs, hand handles/indices, p or playable flags are exposed: pile cards cannot be played from this response. NOT_IN_COMBAT/UNAVAILABLE are not empty; only ok with count=0 and cards=[] confirms empty. Queries do not advance the hand/delta baseline; refresh before acting if floor/turn no longer match.",
+  };
+
+  function collectInterfaceAdvisories(topics) {
+    const advisories = [];
+    for (const id of topics) {
+      const text = INTERFACE_ADVISORIES[id];
+      const key = `interface:${id}`;
+      if (!text || session.advisoryKeys.has(key)) continue;
+      session.advisoryKeys.add(key);
+      advisories.push({ id, text });
+    }
+    return advisories;
+  }
+
   function collectContextAdvisories(state) {
     const advisories = [];
     const floor = Number.isFinite(state?.floor) ? state.floor : "unknown";
     const turn = Number.isFinite(state?.combat_detail?.turn) ? state.combat_detail.turn : "unknown";
     const add = (scope, id, text) => {
-      // Interface semantics are once per connection, not once per floor.
-      const key = scope === "interface" ? `${scope}:${id}` : `${floor}:${scope}:${id}`;
+      const key = `${floor}:${scope}:${id}`;
       if (session.advisoryKeys.has(key)) return;
       session.advisoryKeys.add(key);
       advisories.push({ id, text });
     };
+
+    // Interface hints are connection-scoped. Wait for observable data instead
+    // of consuming them on an incomplete transition frame.
+    const combat = state?.room_phase === "COMBAT" && Number.isFinite(state?.combat_detail?.turn);
+    const hasHand = combat && Array.isArray(state.hand) && state.hand.length > 0;
+    const topics = [];
+    if (state?.in_game) {
+      if (hasHand) topics.push("hand-playability");
+      if (hasHand || choiceCards(state).length > 0) topics.push("card-targeting");
+      if (state.screen_type === "SHOP_SCREEN" && Array.isArray(state.choice_list)
+          && state.choice_list.length > 0) topics.push("shop-choice");
+      if (Array.isArray(state.run_detail?.potions)) topics.push("potion-slots");
+    }
+    advisories.push(...collectInterfaceAdvisories(topics));
 
     if (state?.screen_type === "REST" && stateHasRelic(state, ["Coffee Dripper", "咖啡滤杯"])) {
       add("rest", "coffee-dripper", "Coffee Dripper prevents healing at Rest sites; treat this campfire as an upgrade or other non-healing action.");
@@ -32,10 +65,6 @@ export function createSafety({ config, session }, dependencies = {}) {
 
     if (state?.room_phase !== "COMBAT" || !Number.isFinite(state?.combat_detail?.turn)) {
       return advisories;
-    }
-
-    if (Array.isArray(state.hand) && state.hand.length) {
-      add("interface", "hand-playability", "In a full hand/choice snapshot, p=false means observed unplayable; omitted p is a candidate, not proof (upstream true and missing flags compress alike). In deltas, omitted p retains the old value; p=null clears the old negative marker. Other instance payloads use playable=false; inspect_pile exposes neither marker and cannot establish playability. c=-1 is X-cost (normally all current Energy); c=-2 is the unplayable marker, not negative spending. Special card/free-play effects may alter spending or permit play; check live flags/costs and runtime validation, never the sentinel alone.");
     }
 
     const enemies = liveMonsters(state);
@@ -312,6 +341,7 @@ export function createSafety({ config, session }, dependencies = {}) {
   }
 
   return {
+    collectInterfaceAdvisories,
     collectContextAdvisories,
     syncCombatSafety,
     syncEndTurnSafety,

@@ -178,6 +178,7 @@ try {
     exhaust_pile: [] };
   state.hand.reverse();
   const inspected = await call("inspect_pile", { pile: "draw" });
+  assert.deepEqual(inspected.advisories.map((item) => item.id), ["pile-inspection"]);
   assert.equal(inspected.status, "ok"); assert.equal(inspected.order, "unordered");
   assert.equal(inspected.floor, 50); assert.equal(inspected.turn, 1);
   assert.equal(inspected.count, 4); assert.equal(inspected.cards.length, 3);
@@ -193,6 +194,7 @@ try {
   assert.equal(sent.length, 0, "inspection must never execute gameplay actions");
   pileData.draw_pile.reverse();
   const reversed = await call("inspect_pile", { pile: "draw" });
+  assert.equal(reversed.advisories, undefined);
   assert.deepEqual(reversed.cards, inspected.cards);
   assert.equal(reversed.card_defs, undefined); assert.equal(reversed.card_defs_added, undefined);
   const discard = await call("inspect_pile", { pile: "discard" });

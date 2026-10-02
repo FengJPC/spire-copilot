@@ -10,7 +10,7 @@ Use the `spire_copilot` tools for live state and actions. Before the first live 
 ## Workflow
 
 1. Call `get_state` with `mode: compact` before the first action and after any user-reported mismatch. Treat live state and explicit corrections as authoritative; all indices are 1-based.
-2. Apply any `advisories` before choosing actions. They are context-sensitive and normally emitted once when a mechanic first matters. Read `current.stance` in action/delta receipts; do not infer stance from card damage.
+2. Apply `advisories` from state, action and inspection responses before choosing actions. Interface hints arrive once per connection at the relevant hand/choice, shop, inventory or pile query; reconnect resets them. Combat hints retain their encounter/turn scopes. Read `current.stance` in action/delta receipts; do not infer stance from card damage.
 3. Use `inspect_card` when an effect is missing, unfamiliar, modified, or worth verifying. Prefer an exact `choice_uuid`, otherwise `card_id` plus upgrades; do not request full state just to inspect one card.
    Use `inspect_pile` with `pile: draw`, `discard`, or `exhaust` only when composition matters for draw, recovery, or cycle planning. It is unordered, not a prediction of the next draw; pile stats may change on entering hand.
 4. Use `card_name` for the cheapest playable same-effect copy, or `card` with a hand `k` for an exact copy; Copilot handles instance matching and reindexing. Use `act` when the next decision needs a fresh observation; `act_many` can group already-decided actions with stable turns, targets, and choices. It verifies each action and stops at an unsafe boundary; never plan through unknown draws or new choices.
@@ -19,7 +19,7 @@ Use the `spire_copilot` tools for live state and actions. Before the first live 
 
 If the endpoint is unavailable, ask the user to start ModTheSpire with `MCP The Spire` enabled and enter the save; no separate relay is needed.
 
-Before the first shop purchase, potion management, pile query, or ambiguous-action recovery, read the relevant section of [state-and-actions.md](references/state-and-actions.md), reusing it while retained. Before planning around retaliation, Normality, Time Eater, or poison lethal, read the applicable entry in [combat-safety.md](references/combat-safety.md) unless a runtime advisory already explains that mechanic adequately. Trigger these checks by the intended action, not by feeling confused.
+Before the first shop purchase, potion management or pile query, apply the relevant runtime interface hint; if it is absent from retained context or does not cover the decision, read the relevant section of [state-and-actions.md](references/state-and-actions.md). Read that reference before ambiguous-action recovery and after a field/effect mismatch. Before planning around retaliation, Normality, Time Eater, or poison lethal, read the applicable entry in [combat-safety.md](references/combat-safety.md) unless a runtime advisory already explains that mechanic adequately. Reuse while retained; trigger checks by the intended action, not by feeling confused.
 
 ## Collaboration
 

@@ -2,6 +2,34 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.25] - 2026-10-03
+
+### Added
+
+- Connection-scoped interface hints for card targeting, current potion slots,
+  fresh shop choices and on-demand pile inspection. State/action responses
+  trigger observable contexts; card/pile queries attach their own hints without
+  advancing hand/run deltas or consuming unseen combat advisories. Invalid
+  queries and incomplete context frames do not consume the relevant hint.
+- Regression coverage for targeting aliases and full-snapshot/patch omission,
+  first-context delivery, deduplication across turns/floors/query paths,
+  reconnect re-emission, and retained turn-scoped safety warnings.
+
+### Clarified
+
+- Document `t: true` (hand/choices/piles) versus `target: true` (other instances
+  and definitions). Normal upstream live/definition conversion emits
+  `has_target` only for ENEMY/SELF_AND_ENEMY; other modes intentionally omit it.
+  Compression also collapses false/missing data, so conflicting Mod effects
+  require inspection, not an ATTACK/SKILL-based targeting guess.
+- Targeted plays supply a fresh 1-based `target_index`; choosing a card is
+  different from playing it. Delta omission retains `t`, explicit null clears
+  it, and targeting does not establish playability. Potion targets remain
+  governed by their separate `requires_target` flag.
+- Skill routing accepts adequately explained, retained interface hints for
+  routine operations; the mandatory first-action contract and mismatch/unknown
+  action recovery rules remain. Execution, settlement and guards are unchanged.
+
 ## [0.2.24] - 2026-10-03
 
 ### Added

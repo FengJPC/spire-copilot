@@ -4,6 +4,7 @@ export function createInspection({ config, session }, dependencies = {}) {
     cardRef,
     cardUpgradeCount,
     collectCardInstances,
+    collectInterfaceAdvisories,
     compactCardInstance,
     decisionState,
     loadCardInfo,
@@ -11,6 +12,12 @@ export function createInspection({ config, session }, dependencies = {}) {
     pendingCardDefinitionPayload,
     rememberCardDefinition,
   } = dependencies;
+
+  function withInterfaceAdvisories(value, topics) {
+    // Consume only the hints actually returned here, never combat/state deltas.
+    const advisories = collectInterfaceAdvisories(topics);
+    return advisories.length ? { ...value, advisories } : value;
+  }
 
   function validateCardInspectionArgs(args) {
     const selectors = ["choice_uuid", "card_id", "card_name"]
@@ -82,20 +89,20 @@ export function createInspection({ config, session }, dependencies = {}) {
 
     const definition = session.cardCatalog.definitions.get(ref);
     if (!definition) {
-      return {
+      return withInterfaceAdvisories({
         status: "DEFINITION_UNAVAILABLE",
         ref,
         source: instances.length ? "live_instance" : "not_found",
         ...(instances.length ? {
           instances: instances.map(({ card, zone }) => compactCardInstance(card, zone)),
         } : {}),
-      };
+      }, instances.length ? ["card-targeting"] : []);
     }
 
     session.cardCatalog.emittedRefs.add(ref);
     const matchingInstances = instances.filter(({ card }) => cardRef(card) === ref);
     const preferred = preferredCardInstance(matchingInstances);
-    return {
+    return withInterfaceAdvisories({
       status: "ok",
       ref,
       source: matchingInstances.length ? "live_instance" : "downstream_definition",
@@ -105,7 +112,7 @@ export function createInspection({ config, session }, dependencies = {}) {
         : matchingInstances.length
           ? { instances: matchingInstances.map(({ card, zone }) => compactCardInstance(card, zone)) }
           : {}),
-    };
+    }, ["card-targeting"]);
   }
 
   function validatePileInspectionArgs(args) {
@@ -156,20 +163,22 @@ export function createInspection({ config, session }, dependencies = {}) {
     const state = await decisionState({ includePiles: true });
     const context = { pile: args.pile, floor: state.floor, turn: state.combat_detail?.turn };
     if (!state.in_game || state.room_phase !== "COMBAT") {
-      return { status: "NOT_IN_COMBAT", ...context };
+      return withInterfaceAdvisories({ status: "NOT_IN_COMBAT", ...context }, ["pile-inspection"]);
     }
     const cards = state._combat_piles?.[args.pile];
     if (!Array.isArray(cards) || cards.some((card) => !card || typeof card !== "object")) {
-      return { status: "UNAVAILABLE", ...context,
-        reason: "Downstream did not provide a complete pile; do not treat this as empty" };
+      return withInterfaceAdvisories({ status: "UNAVAILABLE", ...context,
+        reason: "Downstream did not provide a complete pile; do not treat this as empty" }, ["pile-inspection"]);
     }
     const refs = new Set(cards.map(cardRef).filter(Boolean));
     const missing = [...refs].filter((ref) => !session.cardCatalog.definitions.has(ref)).sort();
     // Read-only inspection must not replace previousState/observedHandState or
-    // consume run/map/advisory deltas which have not yet been sent to the caller.
-    return { status: "ok", ...context, order: "unordered", count: cards.length,
+    // consume run/map/combat advisories not sent to the caller. Only the interface
+    // hints attached to this response are marked as delivered.
+    return withInterfaceAdvisories({ status: "ok", ...context, order: "unordered", count: cards.length,
       cards: compactPileCards(cards), ...pendingCardDefinitionPayload(refs),
-      ...(missing.length ? { definitions_unavailable: missing } : {}) };
+      ...(missing.length ? { definitions_unavailable: missing } : {}) },
+      cards.length ? ["pile-inspection", "card-targeting"] : ["pile-inspection"]);
   }
 
   return {

@@ -96,6 +96,7 @@ export function createRuntime({ env = process.env, config: overrides = {} } = {}
     cardRef: (...args) => modules.cards.cardRef(...args),
     cardUpgradeCount: (...args) => modules.cards.cardUpgradeCount(...args),
     collectCardInstances: (...args) => modules.cards.collectCardInstances(...args),
+    collectInterfaceAdvisories: (...args) => modules.safety.collectInterfaceAdvisories(...args),
     compactCardInstance: (...args) => modules.cards.compactCardInstance(...args),
     decisionState: (...args) => modules.state.decisionState(...args),
     loadCardInfo: (...args) => modules.cards.loadCardInfo(...args),
