@@ -40,7 +40,11 @@ Slay the Spire run. It adds a compact, safety-aware bridge in front of the
   slots, and explicit Neutral/Wrath/Calm stance with small action/delta echoes.
 - Compact Watcher stance and complete player-power metadata, including
   negative amounts and newly applied statuses.
-- A Codex skill that explains pivotal decisions and pauses after each combat.
+- A short first-action interface contract with action-triggered deeper references.
+- One-shot Poison timing and modified live-cost advisories, without guessing
+  missing costs or attributing every mismatch to Confusion.
+- A Codex skill that explains pivotal decisions and defaults to combat pauses,
+  while honoring explicit continuous-run authorization.
 
 ## Requirements
 
@@ -127,6 +131,20 @@ Enemy `atk` is upstream displayed intent damage per hit, already stance-adjusted
 (including Wrath), before player Block. `AxN` means A on each of N hits, not a
 total or guaranteed HP loss. A one-shot runtime advisory makes this explicit;
 Copilot never applies a second Wrath multiplier to the upstream intent.
+
+Hand `c` is the live current-turn cost; `card_defs` cost is the printed/upgraded
+baseline. A mismatch can be legitimate modification. An observed mismatch or
+Confusion prompts a one-shot explanation; no known baseline means no fabricated
+comparison. Poison/Noxious Fumes also trigger one-shot timing guidance so that
+next-player-turn effects are not counted as preventing the intervening attack.
+
+Before the first live action, read the bundled short interface contract once
+and reuse it while retained. Detailed references are routed by imminent
+operations, not only by confusion. By default, stop at combat rewards; explicit
+continuous-run authorization allows reward, shop and route decisions without
+routine pauses, while unresolved uncertainty or required new authority still
+stops play. Uncertain actions first stop mutations for read-only recovery,
+never blind retries.
 
 `act_many` sends and verifies each action separately. Whole-batch preflight can
 reject a predictable safety violation before any action is sent; runtime halts

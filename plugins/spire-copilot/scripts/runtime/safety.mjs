@@ -1,6 +1,7 @@
 // safety responsibilities; dependencies are injected by runtime/index.mjs.
 export function createSafety({ config, session }, dependencies = {}) {
   const {
+    cardRef,
     cardForAction,
     choiceCards,
     entityHasPower,
@@ -35,6 +36,20 @@ export function createSafety({ config, session }, dependencies = {}) {
     const enemies = liveMonsters(state);
     const enemyMatches = (identities) => enemies.some((enemy) => entityMatches(enemy, identities));
     const enemyHasPower = (identities) => enemies.some((enemy) => entityHasPower(enemy, identities));
+    const player = state?.combat_detail?.player;
+    if (enemies.some((enemy) => (enemy.powers ?? []).some((power) =>
+      entityMatches(power, ["Poison", "中毒"]) && Number.isFinite(power.amount) && power.amount > 0))
+        || entityHasPower(player, ["Noxious Fumes", "NoxiousFumes", "毒雾"])) {
+      add("combat", "poison-timing", "For a poison lethal at end_turn, count only Poison already on the enemy: it ticks before that enemy acts. Noxious Fumes triggers at the next player-turn start, not before the intervening enemy action. Check live HP/powers and unusual Mod mechanics; do not invent extra Poison.");
+    }
+    const changedCost = (state.hand ?? []).some((card) => {
+      const definition = session.cardCatalog.definitions.get(cardRef(card));
+      return Number.isFinite(card.cost) && card.cost >= 0
+        && Number.isFinite(definition?.c) && definition.c >= 0 && card.cost !== definition.c;
+    });
+    if (changedCost || entityHasPower(player, ["Confusion", "混乱"])) {
+      add("combat", "live-card-cost", "Hand c is the live current-turn cost; card_defs c is the printed/upgraded baseline. Differences can be legitimate cost modification, not automatically bad Mod data. Budget live costs and playability, refresh after draw/cost changes, and do not infer the cause from a mismatch alone. Negative X-cost/unplayable sentinels are not ordinary numeric costs.");
+    }
     if (enemies.some((enemy) => Number.isFinite(enemy.move?.damage) && enemy.move.damage >= 0)) {
       add("combat", "incoming-damage", "Enemy atk is the game's current displayed intent damage per hit, already adjusted for stance including Wrath; do not double it again. AxN means A damage on each of N hits, before your Block, not guaranteed HP loss. Refresh after changing stance; unusual Mod mechanics may alter actual damage.");
     }

@@ -2,6 +2,31 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.22] - 2026-10-03
+
+### Added
+
+- A short first-action interface contract, reused while retained, with
+  operation-triggered routing to detailed references instead of relying on an
+  agent to realize it is confused.
+- One-shot combat advisories for observed Poison/Noxious Fumes timing and live
+  costs differing from known card definitions (or observed Confusion). Compare
+  the matching upgraded baseline; missing data and negative sentinels do not
+  invent a numeric mismatch or identify its cause.
+- Unit and stdio/HTTP regression coverage for delayed triggers, deduplication,
+  unavailable definitions, upgraded and special costs, and separate live vs
+  definition values without changing action execution.
+
+### Clarified
+
+- Default battle-by-battle pauses yield to explicit continuous-run authorization,
+  including reward and route decisions, without adding forced shop/Boss pauses
+  or weakening safety, later stop requests, or authority boundaries.
+- Hand `c` is current-turn cost, not the cached printed/upgraded baseline.
+- Shop text selection exists because upstream purchases use a filtered mixed
+  list, not a universal UUID selector; ambiguity must fail closed before spend.
+- Execution, settlement, no-retry rules and target/Normality guards are unchanged.
+
 ## [0.2.21] - 2026-10-03
 
 ### Fixed

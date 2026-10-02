@@ -1,6 +1,6 @@
 # State and action details
 
-Read this reference only when compact fields are unclear, a state mismatch is reported, or an action result needs recovery.
+Read the relevant section before the first shop purchase, potion management, pile query, or ambiguous-action recovery in the available working context. Reuse while retained; also consult it after a mismatch. Do not wait until a field feels unclear.
 
 ## Compact state
 
@@ -9,11 +9,12 @@ Read this reference only when compact fields are unclear, a state mismatch is re
 - In combat, `stance` explicitly reports `Neutral` when an available upstream player object omits its neutral stance. Action and delta receipts include `current.stance` even when unchanged; this is a snapshot, not a delta. `null` means non-combat or unavailable player/stance data, never permission to assume Neutral. Preserve unrecognized Mod stance names.
 - The first map state in an act includes the complete graph. Later states use `map_ref` plus current and next nodes; map nodes use `s` for the room symbol and `to` for child coordinates.
 - Initial cached card effects arrive in `card_defs`; newly encountered generated, rewarded, or Mod cards arrive once in `card_defs_added`. Hand and choice entries use `ref` plus live values.
+- Hand `c` is current-turn instance cost; definition `c` is the printed/upgraded baseline. A difference can reflect Confusion or another legitimate cost modifier, not automatically bad Mod data. Budget the latest hand cost and playability; X-cost/unplayable negative sentinels are not ordinary numeric costs. Do not infer which modifier caused a difference from cost alone.
 - In hand entries, `d` is current per-hit damage before target-only modifiers. `ed` is a target-adjusted per-hit estimate: a number for the sole enemy or an enemy-index map for multiple targets. Multiply by the hit count and still account for block and unusual Mod mechanics.
 - Enemy `atk` is the game's displayed intent damage, already adjusted for current stance (including Wrath). Do not double it again. `AxN` means A damage on each of N hits before player Block, not guaranteed HP loss. Missing `atk` is unknown/non-attacking intent, not proof of zero damage; explicit zero is preserved when supplied. Refresh after stance changes and consider additional powers/Mod mechanics.
 - Hand cards have a short instance handle `k` and their actual 1-based position `i`; `ref` identifies the shared effect definition, not a physical copy.
 - `hand.changed.key` identifies `k`; preserve omitted fields, remove by `removed[].k`, insert `added` cards, and order by `i`. Duplicate names and same-effect refs remain distinct.
-- Shop choices keep their authoritative `text` and `i`, with `kind` for recognized card/relic/potion/purge formats. Identity enrichment matches the appropriate `details` list by unique name and price, never by position. Only card items can have `card_id`/`ref`/`choice_uuid`; relics and potions use `item_id`. Missing identity means unmatched/ambiguous formatting or data; use `details` and fresh text rather than guessing. Shop actions still require unique `choice_text`, even if a card UUID is exposed for inspection.
+- Shop choices keep their authoritative `text` and `i`, with `kind` for recognized card/relic/potion/purge formats. Identity enrichment matches the appropriate `details` list by unique name and price, never by position. Only card items can have `card_id`/`ref`/`choice_uuid`; relics and potions use `item_id`. Missing identity means unmatched/ambiguous formatting or data; use `details` and fresh text rather than guessing. Shop actions still require unique `choice_text`, even if a card UUID is exposed for inspection: the upstream purchase selector is a filtered mixed-item list, not a universal UUID selector. The runtime resolves text against fresh choices and fails closed on ambiguity before an irreversible spend.
 
 ## On-demand piles
 

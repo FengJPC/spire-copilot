@@ -5,7 +5,7 @@ description: Play or advise on a live modded Slay the Spire run through the Spir
 
 # Play Slay the Spire
 
-Use the `spire_copilot` tools for live state and actions.
+Use the `spire_copilot` tools for live state and actions. Before the first live action, read [interface-contract.md](references/interface-contract.md) once in the available working context; reuse it while retained, rather than rereading every turn.
 
 ## Workflow
 
@@ -19,12 +19,12 @@ Use the `spire_copilot` tools for live state and actions.
 
 If the endpoint is unavailable, ask the user to start ModTheSpire with `MCP The Spire` enabled and enter the save; no separate relay is needed.
 
-Read [state-and-actions.md](references/state-and-actions.md) only when interpreting compact fields, diagnosing a mismatch, or recovering an ambiguous/failed action. Read [combat-safety.md](references/combat-safety.md) only when a special mechanic is not adequately covered by a runtime advisory.
+Before the first shop purchase, potion management, pile query, or ambiguous-action recovery, read the relevant section of [state-and-actions.md](references/state-and-actions.md), reusing it while retained. Before planning around retaliation, Normality, Time Eater, or poison lethal, read the applicable entry in [combat-safety.md](references/combat-safety.md) unless a runtime advisory already explains that mechanic adequately. Trigger these checks by the intended action, not by feeling confused.
 
 ## Collaboration
 
-- When the user says to continue, operate autonomously until the next meaningful pause and explain only pivotal choices.
-- After every combat, stop on the reward screen, briefly recap, and wait before taking rewards.
+- By default, a request to continue authorizes play through the next combat; stop on its reward screen, briefly recap, and wait before taking rewards.
+- Explicit continuous-play authorization for the run overrides that default: handle rewards and continue through map, shop, elite and Boss decisions without routine confirmation. Honor any user-selected pause boundary or later stop request. After an uncertain action, stop mutations and read state without replaying it; pause for the user if fresh reads cannot resolve the uncertainty/mismatch or new authority is required. Explain pivotal choices and brief combat outcomes without forcing a pause.
 - Be candid about mistakes and refresh state after a reported mismatch.
 
 ## Token discipline

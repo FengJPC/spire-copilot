@@ -40,6 +40,7 @@ export function createRuntime({ env = process.env, config: overrides = {} } = {}
     rawTool: (...args) => modules.transport.rawTool(...args),
   });
   modules.safety = createSafety(context, {
+    cardRef: (...args) => modules.cards.cardRef(...args),
     cardForAction: (...args) => modules.cards.cardForAction(...args),
     choiceCards: (...args) => modules.cards.choiceCards(...args),
     entityHasPower: (...args) => modules.shared.entityHasPower(...args),

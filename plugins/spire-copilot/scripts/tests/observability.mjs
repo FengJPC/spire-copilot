@@ -114,4 +114,53 @@ assert.equal(fresh.modules.safety.collectContextAdvisories({ ...combat,
   combat_detail: { turn: 2, player: { stance: "Wrath" } } }).filter((item) => item.id === "incoming-damage").length, 0);
 assert.equal(fresh.modules.safety.collectContextAdvisories({ ...combat, floor: 6 })
   .filter((item) => item.id === "incoming-damage").length, 1);
-console.log("Observability tests passed: identity-aligned shop choices, fail-closed ambiguity, potion slots, explicit stance snapshots, and displayed intent semantics.");
+// Context pushes must appear when the mechanism first becomes observable,
+// even mid-combat; unknown bases and sentinel values must not invent a cause.
+const relevant = (items) => items.filter((item) => ["poison-timing", "live-card-cost"].includes(item.id));
+const contextual = createRuntime({ env: {} });
+const baseState = { ...combat, hand: [], monsters: [{ id: "Enemy", current_hp: 40, powers: [] }],
+  combat_detail: { turn: 1, player: {} } };
+assert.deepEqual(relevant(contextual.modules.safety.collectContextAdvisories(baseState)), []);
+const poisoned = { ...baseState, monsters: [{ id: "Enemy", current_hp: 40,
+  powers: [{ id: "Poison", amount: 3 }] }] };
+assert.deepEqual(relevant(contextual.modules.safety.collectContextAdvisories(poisoned)).map((item) => item.id), ["poison-timing"]);
+assert.deepEqual(relevant(contextual.modules.safety.collectContextAdvisories(poisoned)), []);
+assert.deepEqual(relevant(contextual.modules.safety.collectContextAdvisories({ ...poisoned,
+  combat_detail: { turn: 2, player: {} } })), [], "timing explanation is not repeated every turn");
+assert.equal(relevant(contextual.modules.safety.collectContextAdvisories({ ...poisoned, floor: 6 })).length, 1);
+for (const powers of [[{ id: "Poison", amount: 0 }], [{ id: "Poison" }], [{ id: "ModPoison", amount: 5 }]]) {
+  assert.deepEqual(relevant(createRuntime({ env: {} }).modules.safety.collectContextAdvisories({ ...baseState,
+    monsters: [{ powers }] })), []);
+}
+assert.deepEqual(relevant(createRuntime({ env: {} }).modules.safety.collectContextAdvisories({ ...poisoned,
+  monsters: [{ ...poisoned.monsters[0], is_gone: true }] })), []);
+for (const id of ["Noxious Fumes", "毒雾"]) {
+  assert.equal(relevant(createRuntime({ env: {} }).modules.safety.collectContextAdvisories({ ...baseState,
+    combat_detail: { turn: 1, player: { powers: [{ id, amount: 2 }] } } }))[0].id, "poison-timing");
+}
+const priced = createRuntime({ env: {} });
+const pricedCard = { id: "EmptyMind", name: "清心", cost: 3, uuid: "priced", upgrades: 0 };
+const pricedState = { ...baseState, hand: [pricedCard] };
+assert.deepEqual(relevant(priced.modules.safety.collectContextAdvisories(pricedState)), [], "missing definition is not a cost mismatch");
+priced.session.cardCatalog.rawById.set("EmptyMind", { id: "EmptyMind", cost: 1, upgraded: { cost: 0 } });
+priced.modules.cards.rememberCardDefinition(pricedCard);
+const pricedReceipt = priced.modules.compaction.rememberAndCompact(pricedState);
+assert.equal(pricedReceipt.hand[0].c, 3, "keep live cost rather than substituting definition cost");
+assert.equal(pricedReceipt.card_defs["EmptyMind@0"].c, 1);
+assert.equal(relevant(pricedReceipt.advisories)[0].id, "live-card-cost");
+assert.deepEqual(relevant(priced.modules.safety.collectContextAdvisories(pricedState)), []);
+for (const cost of [1, -1, -2, undefined]) {
+  assert.deepEqual(relevant(priced.modules.safety.collectContextAdvisories({ ...pricedState,
+    floor: 8, hand: [{ ...pricedCard, cost }] })), [], "equal, unknown and special costs do not trigger numeric mismatch");
+}
+const upgradedCard = { ...pricedCard, upgrades: 1, cost: 0 };
+priced.modules.cards.rememberCardDefinition(upgradedCard);
+assert.deepEqual(relevant(priced.modules.safety.collectContextAdvisories({ ...pricedState,
+  floor: 8, hand: [upgradedCard] })), [], "compare the matching upgraded definition");
+assert.equal(relevant(priced.modules.safety.collectContextAdvisories({ ...pricedState,
+  floor: 8, hand: [{ ...upgradedCard, cost: 2 }] }))[0].id, "live-card-cost");
+assert.equal(relevant(createRuntime({ env: {} }).modules.safety.collectContextAdvisories({ ...baseState,
+  combat_detail: { turn: 1, player: { powers: [{ id: "Confusion" }] } } }))[0].id, "live-card-cost");
+assert.deepEqual(relevant(createRuntime({ env: {} }).modules.safety.collectContextAdvisories({ ...poisoned,
+  room_phase: "COMPLETE" })), [], "no combat explanation outside combat");
+console.log("Observability tests passed: shop identity, potion slots, stance/intent semantics, and context-triggered one-shot Poison/live-cost advisories.");

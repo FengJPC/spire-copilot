@@ -201,7 +201,7 @@ export function createProtocol({ config, session }, dependencies = {}) {
           protocolVersion: params.protocolVersion ?? "2024-11-05",
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: "spire-copilot", version: pluginVersion },
-          instructions: "Read get_state and apply advisories. Read current.stance in action/delta receipts. Use card with hand k for exact copies or card_name for cheapest playable equivalents; Copilot handles UUID matching and reindexing. Hand changes update key=k, not effect ref. act_many verifies already-decided actions one by one; use act across observation boundaries. Choices use choice_text or choice_uuid; shops require choice_text. Never resend uncertain end_turn; inspect state instead.",
+          instructions: "Read get_state and apply advisories. Read current.stance in action/delta receipts; hand c is live current-turn cost, not cached definition cost. Use card with hand k for exact copies or card_name for cheapest playable equivalents; Copilot handles UUID matching and reindexing. Hand changes update key=k, not effect ref. act_many verifies already-decided actions one by one; use act across observation boundaries. Choices use choice_text or choice_uuid; shops require choice_text. Never resend uncertain end_turn; inspect state instead.",
         },
       };
     }
