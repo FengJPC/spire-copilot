@@ -28,7 +28,7 @@ map screens reuse `map_ref`; each node uses `s` for its room symbol and `to` for
 child coordinates. Deck, relic, potion, stance, and player-power changes are
 reported explicitly. Card effects are emitted once in `card_defs`, newly seen
 cards arrive in `card_defs_added`, and later choices retain only stable refs and
-live values. Stance and debuff changes update matching hand refs in place rather
+live values. Stance and debuff changes update matching hand instances in place rather
 than resending whole cards. Target-only modifiers add `ed`, a compact estimated
 damage-per-hit value for the affected enemy or enemies. Batched actions poll a
 fresh state until an observable result appears and also retain minimum
@@ -38,6 +38,13 @@ incomplete data are filtered.
 Semantic hand changes preserve repeated identical cards and include the
 absolute post-change `count`, allowing clients to verify hand size without a
 second full-state request.
+Each physical hand card has a short handle `k` and actual position `i`; deltas
+use handles rather than shared effect refs. `card_name` automatically chooses
+the cheapest playable same-effect copy. Use `card: "h7"` for one exact copy.
+The runtime binds numeric indices to the last observed hand and sends UUIDs
+to the game's single-action batch endpoint for game-thread resolution. Missing
+copies, ambiguous effects, increased exact-copy costs, or insufficient energy
+halt before execution. No long UUID bookkeeping is required of the caller.
 Compact reads and action receipts also emit deduplicated `advisories` when a
 relevant special mechanic first appears, including supported boss openings,
 per-hit retaliation, Normality, unsafe Wrath turns, and Coffee Dripper at Rest

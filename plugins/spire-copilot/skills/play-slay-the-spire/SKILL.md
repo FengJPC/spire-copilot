@@ -12,7 +12,7 @@ Use the `spire_copilot` tools for live state and actions.
 1. Call `get_state` with `mode: compact` before the first action and after any user-reported mismatch. Treat live state and explicit corrections as authoritative; all indices are 1-based.
 2. Apply any `advisories` before choosing actions. They are context-sensitive and normally emitted once when a mechanic first matters.
 3. Use `inspect_card` when an effect is missing, unfamiliar, modified, or worth verifying. Prefer an exact `choice_uuid`, otherwise `card_id` plus upgrades; do not request full state just to inspect one card.
-4. Prefer `act` for decisions. Use `act_many` only for a short sequence whose turn, targets, and choices cannot change unexpectedly.
+4. Use `card_name` for the cheapest playable same-effect copy, or `card` with a hand `k` for an exact copy; Copilot handles instance matching and reindexing. Prefer `act`; use `act_many` only for short sequences with stable turns, targets, and choices.
 5. Trust settled action receipts and `changes`. Never replay completed actions or an uncertain `end_turn`; read state after ambiguity. Send known-lethal targeted attacks separately before targeting remaining enemies.
 6. Resolve changing card choices by `choice_uuid` or unique `choice_text`; shops require `choice_text`. Never spend, buy, remove, or choose rewards from stale state.
 
@@ -29,5 +29,5 @@ Read [state-and-actions.md](references/state-and-actions.md) only when interpret
 ## Token discipline
 
 - After the initial compact state, rely on `changes`, `run_delta`, and cached card definitions. Use delta only while prior state remains reliable and full state only for diagnostics.
-- Preserve omitted fields in `hand.changed` entries; they update the matching `ref` rather than replacing the card.
+- Preserve omitted fields in `hand.changed`; match `key` to hand `k`, not effect `ref`. Do not infer hand positions from delta order.
 - Do not repeat the complete deck, relic list, card catalog, or map unless diagnosing a mismatch.

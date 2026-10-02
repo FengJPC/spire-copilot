@@ -2,6 +2,32 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.16] - 2026-10-02
+
+### Fixed
+
+- Track physical hand copies with short stable `k` handles and actual `i`
+  positions. Semantic deltas update and remove exact copies, preserving
+  different Snecko costs, live effects, multiplicity, and reordered hands.
+- Bind legacy numeric card selections to UUIDs from the last observed hand,
+  including every item in a batch. Never downgrade an exact copy to a name.
+- Send one UUID-bound action at a time through MCP The Spire's game-thread
+  batch endpoint, closing the read-to-send position-reordering window.
+- Check affordability/playability at each step and halt on missing copies or
+  increased costs for exact selections. Failed/uncertain actions never cause
+  an automatic retry or execution of the remaining batch, including end-turn.
+
+### Added
+
+- Keep the simple `card_name` interface: choose the cheapest playable copy
+  with equivalent effects. Use `card: "h7"` only when a particular copy is
+  intended; same-name copies with different effects require an exact handle.
+- Add unit regressions and an isolated stdio/HTTP integration fixture covering
+  duplicate costs, external reorders, initial-hand batch indices, spent or
+  missing copies, increased cost, partial failure, timeout, and turn changes.
+- Update gameplay guidance for instance-keyed deltas and runtime-owned
+  selection/reindexing. Restart the client after installing the update.
+
 ## [0.2.15] - 2026-09-27
 
 ### Fixed

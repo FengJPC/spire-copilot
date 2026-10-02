@@ -90,8 +90,9 @@ errors, verification errors, and verification timeouts are reported separately.
 Development checks:
 
 ```powershell
-node scripts/server.mjs --self-test
-node scripts/server.mjs --benchmark
+node plugins/spire-copilot/scripts/server.mjs --self-test
+node plugins/spire-copilot/scripts/test-hand-actions.mjs
+node plugins/spire-copilot/scripts/server.mjs --benchmark
 ```
 
 The benchmark is a synthetic regression fixture for comparing response shapes;

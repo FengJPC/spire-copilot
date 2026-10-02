@@ -2,7 +2,7 @@
 
 import readline from "node:readline";
 
-const pluginVersion = "0.2.15";
+const pluginVersion = "0.2.16";
 const endpoint = process.env.STS_MCP_URL ?? "http://127.0.0.1:8080/mcp";
 const accept = "application/json, text/event-stream";
 const pollMs = Number(process.env.STS_POLL_MS ?? 180);
@@ -15,6 +15,8 @@ let sessionId;
 let requestId = 1;
 let toolCache;
 let previousState;
+let observedHandState;
+let handHandles = { next: 1, byUuid: new Map(), byKey: new Map() };
 let previousRunContext;
 let gameInitialized = false;
 let combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
@@ -60,6 +62,8 @@ function resetMapCache() {
 }
 
 function resetCardCatalog() {
+  observedHandState = undefined;
+  handHandles = { next: 1, byUuid: new Map(), byKey: new Map() };
   cardCatalog = {
     activeRun: false,
     rawById: new Map(),
@@ -862,6 +866,12 @@ function isTargetedAction(action) {
 
 function cardForAction(state, action) {
   const hand = state?.hand ?? [];
+  if (action?.card_uuid) return hand.find((card) => card.uuid === action.card_uuid);
+  if (action?.card) {
+    const uuid = handHandles.byKey.get(action.card);
+    return uuid ? hand.find((card) => card.uuid === uuid)
+      : hand.find((card) => card.name === action.card);
+  }
   if (Number.isInteger(action?.card_index)) return hand[action.card_index - 1];
   if (action?.card_name) return hand.find((card) => card.name === action.card_name);
   if (action?.card_id) return hand.find((card) => card.id === action.card_id);
@@ -1005,13 +1015,81 @@ function monsterRosterKey(state) {
 }
 
 function normalizeStableCardReference(action, initialState) {
-  if (!isPlayCardAction(action) || !Number.isInteger(action.card_index)) return { ...action };
+  if (!isPlayCardAction(action)) return { ...action };
+  const selectors = ["card", "card_index", "card_name", "card_id"].filter((key) => action[key] !== undefined);
+  if (selectors.length !== 1) throw new Error("SAFETY play_card requires exactly one card selector");
+  if (!Number.isInteger(action.card_index)) return { ...action };
   const card = (initialState?.hand ?? [])[action.card_index - 1];
   if (!card) throw new Error(`SAFETY card index ${action.card_index} was not present in the initial hand`);
+  if (!card.uuid) throw new Error("SAFETY indexed card has no instance UUID; use a unique card name");
   const normalized = { ...action };
   delete normalized.card_index;
-  normalized.card_name = card.name;
+  normalized.card_uuid = card.uuid;
+  normalized.card_key = handHandle(card);
+  normalized.expected_cost = card.cost;
   return normalized;
+}
+
+function handHandle(card) {
+  if (!card?.uuid) return undefined;
+  if (!handHandles.byUuid.has(card.uuid)) {
+    const key = `h${handHandles.next++}`;
+    handHandles.byUuid.set(card.uuid, key);
+    handHandles.byKey.set(key, card.uuid);
+  }
+  return handHandles.byUuid.get(card.uuid);
+}
+
+function playableHandCard(card, state) {
+  return card.is_playable !== false
+    && !(Number.isFinite(card.cost) && card.cost >= 0
+      && Number.isFinite(state.current_energy) && card.cost > state.current_energy);
+}
+
+function interchangeableCardSignature(card) {
+  // Same name alone is not enough for upgraded or Mod-modified copies.
+  return JSON.stringify([card.id, cardUpgradeCount(card), card.type, card.damage,
+    card.block, card.magic_number, card.exhausts, card.self_retain, card.ethereal,
+    card.description]);
+}
+
+function resolvePlayCardAction(state, action) {
+  const hand = state?.hand ?? [];
+  const selector = action.card;
+  const explicitUuid = action.card_uuid ?? handHandles.byKey.get(selector);
+  let matches;
+  if (explicitUuid) matches = hand.filter((card) => card.uuid === explicitUuid);
+  else if (selector && /^h\d+$/.test(selector)) {
+    throw new Error(`SAFETY unknown hand handle '${selector}'; refresh state`);
+  } else if (selector || action.card_name) {
+    matches = hand.filter((card) => card.name === (selector ?? action.card_name));
+  } else matches = hand.filter((card) => card.id === action.card_id);
+  if (!matches.length) throw new Error("SAFETY selected card is no longer in hand; refresh state");
+  if (explicitUuid && matches.length !== 1) throw new Error("SAFETY duplicate instance UUID in hand");
+  if (!explicitUuid && new Set(matches.map(interchangeableCardSignature)).size > 1) {
+    throw new Error("SAFETY same-name cards have different effects; use the exact hand handle k");
+  }
+  const candidates = matches.filter((card) => playableHandCard(card, state));
+  if (!candidates.length) throw new Error("SAFETY selected card is not currently playable or affordable");
+  const card = candidates.reduce((best, next) => next.cost < best.cost ? next : best);
+  const observed = observedHandState?.hand?.find((item) => item.uuid === card.uuid);
+  const expectedCost = action.expected_cost ?? (explicitUuid ? observed?.cost : undefined);
+  if (Number.isFinite(expectedCost) && card.cost > expectedCost) {
+    throw new Error("SAFETY selected card cost increased since the observed hand; refresh state");
+  }
+  const index = hand.indexOf(card) + 1;
+  return {
+    action: { action: "play_card", card_uuid: card.uuid, card_index: index,
+      card_key: handHandle(card), card_name: card.name, cost: card.cost,
+      ...(action.target_index ? { target_index: action.target_index } : {}) },
+    // The game's execute_actions resolves UUID on its game thread, closing the
+    // read-to-send reorder window without exposing UUIDs to the model.
+    toolCall: card.uuid
+      ? { name: "execute_actions", args: { actions: [{ action: "play_card", card_uuid: card.uuid,
+        ...(action.target_index ? { target_index: action.target_index } : {}) }] } }
+      : { name: "play_card", args: { card_index: index,
+        ...(action.target_index ? { target_index: action.target_index } : {}) } },
+  };
 }
 
 function actionToolCall(action) {
@@ -1057,6 +1135,8 @@ function targetDamageEstimate(card, state) {
 
 function compactCard(card, state = undefined) {
   const value = { n: card.name, c: card.cost, ...(cardRef(card) ? { ref: cardRef(card) } : {}) };
+  const key = handHandle(card);
+  if (key) value.k = key;
   if (card.is_playable === false) value.p = false;
   if (Number.isFinite(card.damage) && card.damage >= 0) value.d = card.damage;
   const effectiveDamage = targetDamageEstimate(card, state);
@@ -1258,7 +1338,7 @@ function compactState(state, { includeMap = true } = {}) {
       ...(m.powers?.length ? { powers: m.powers.map((power) => ({ id: power.id, ...(power.amount ? { n: power.amount } : {}) })) } : {}),
     }));
   }
-  if (Array.isArray(state.hand)) out.hand = state.hand.map((card) => compactCard(card, state));
+  if (Array.isArray(state.hand)) out.hand = state.hand.map((card, index) => ({ ...compactCard(card, state), i: index + 1 }));
   if (state.choice_list?.length) {
     const cards = choiceCards(state);
     out.choices = state.choice_list.map((text, index) => ({
@@ -1303,10 +1383,27 @@ function multisetDifference(before, after) {
 }
 
 function handCardKey(card) {
-  return card?.ref ?? card?.n;
+  return card?.k ?? card?.ref ?? card?.n;
 }
 
 function handArrayDifference(before, after) {
+  if ([...before, ...after].every((card) => card.k)
+      && new Set(before.map((card) => card.k)).size === before.length
+      && new Set(after.map((card) => card.k)).size === after.length) {
+    const beforeMap = new Map(before.map((card) => [card.k, card]));
+    const afterMap = new Map(after.map((card) => [card.k, card]));
+    const changed = [];
+    for (const card of after) {
+      const old = beforeMap.get(card.k);
+      if (!old) continue;
+      const delta = diffValue(old, card);
+      if (delta !== undefined) changed.push({ key: card.k, ...delta });
+    }
+    const removed = before.filter((card) => !afterMap.has(card.k)).map((card) => ({ k: card.k }));
+    const added = after.filter((card) => !beforeMap.has(card.k));
+    return { count: after.length, ...(changed.length ? { changed } : {}),
+      ...(removed.length ? { removed } : {}), ...(added.length ? { added } : {}) };
+  }
   const beforeRemaining = before.map((item) => ({ item }));
   const afterRemaining = after.map((item) => ({ item }));
   const consumeMatch = (left, right, predicate) => {
@@ -1409,6 +1506,9 @@ function emit(payload) {
 function actionSummary(action, extra = {}) {
   return {
     action: action.action,
+    ...(action.card ? { card: action.card } : {}),
+    ...(action.card_key ? { k: action.card_key } : {}),
+    ...(Number.isFinite(action.cost) ? { cost: action.cost } : {}),
     ...(action.card_name ? { card: action.card_name } : {}),
     ...(!action.card_name && action.card_id ? { card: action.card_id } : {}),
     ...(action.card_index ? { card_index: action.card_index } : {}),
@@ -1419,6 +1519,17 @@ function actionSummary(action, extra = {}) {
     ...(action.potion_slot ? { potion_slot: action.potion_slot } : {}),
     ...extra,
   };
+}
+
+function publicAction(action) {
+  const { card_uuid, card_key, expected_cost, cost, ...value } = action;
+  if (card_uuid) {
+    delete value.card_index;
+    delete value.card_name;
+    delete value.card_id;
+    value.card = card_key ?? handHandles.byUuid.get(card_uuid);
+  }
+  return value;
 }
 
 function failedBatchReceipt(actions, index, error, downstreamAccepted, stateRefreshError = undefined) {
@@ -1443,7 +1554,7 @@ function failedBatchReceipt(actions, index, error, downstreamAccepted, stateRefr
     failed_action_status: failedStatus,
     error_kind: errorKind,
     error: message,
-    remaining_actions: actions.slice(index + 1),
+    remaining_actions: actions.slice(index + 1).map(publicAction),
     state_status: stateRefreshError ? "last_known" : "refreshed_after_failure",
     ...(stateRefreshError ? {
       state_refresh_error: stateRefreshError instanceof Error ? stateRefreshError.message : String(stateRefreshError),
@@ -1489,6 +1600,8 @@ function rememberAndCompact(state, deltaOnly = false, actionResult = undefined) 
   const advisories = collectContextAdvisories(state);
   const advisoryPayload = advisories.length ? { advisories } : {};
   previousState = compact;
+  observedHandState = { floor: state.floor, turn: state?.combat_detail?.turn,
+    hand: (state.hand ?? []).map((card) => ({ ...card })) };
   if (runContext) previousRunContext = runContext;
   if (includeMap) mapCache.emittedVersion = state.map_version;
   if (actionResult) {
@@ -1533,17 +1646,26 @@ async function validateToolCall(name, args) {
   }
 }
 
-async function safeExecuteActions(actions, wait = true, timeout = batchTimeoutMs) {
+async function safeExecuteActions(actions, wait = true, timeout = batchTimeoutMs, single = false) {
   let state = await decisionState({ timeout });
   syncCombatSafety(state);
 
   const isCombatBatch = state.room_phase === "COMBAT" && actions.length > 0;
-  if (isCombatBatch) preflightCombatActions(state, actions);
-  const initialState = state;
-  const normalizedActions = actions.map((action) => normalizeStableCardReference(action, initialState));
+  let normalizedActions;
+  try {
+    if (actions.some((action) => Number.isInteger(action.card_index))
+        && (!observedHandState || observedHandState.floor !== state.floor
+          || observedHandState.turn !== state?.combat_detail?.turn)) {
+      throw new Error("SAFETY indexed cards require a current-turn observed hand; refresh state");
+    }
+    normalizedActions = actions.map((action) => normalizeStableCardReference(action, observedHandState ?? state));
+    if (isCombatBatch) preflightCombatActions(state, normalizedActions);
+  } catch (error) {
+    return settleFailedBatchAction({ state, actions, index: 0, error, downstreamAccepted: false, timeout });
+  }
 
   for (let index = 0; index < normalizedActions.length; index += 1) {
-    const action = normalizedActions[index];
+    let action = normalizedActions[index];
     const beforeRoster = monsterRosterKey(state);
     const beforeTurn = state?.combat_detail?.turn;
 
@@ -1555,8 +1677,13 @@ async function safeExecuteActions(actions, wait = true, timeout = batchTimeoutMs
         await sleep(Math.min(500, Math.max(0, Number(action.ms ?? 100))));
         downstreamAccepted = true;
       } else {
-        if (isPlayCardAction(action)) normalitySafetyCheck(state, [action]);
-        toolCall = actionToolCall(action);
+        if (isPlayCardAction(action)) {
+          const resolved = resolvePlayCardAction(state, action);
+          action = resolved.action;
+          normalizedActions[index] = action;
+          normalitySafetyCheck(state, [action]);
+          toolCall = resolved.toolCall;
+        } else toolCall = actionToolCall(action);
         if (toolCall) {
           if (toolCall.name === "choose") {
             toolCall = { ...toolCall, args: normalizeChooseArgs(state, toolCall.args) };
@@ -1565,7 +1692,7 @@ async function safeExecuteActions(actions, wait = true, timeout = batchTimeoutMs
           await validateToolCall(toolCall.name, toolCall.args);
           await rawTool(toolCall.name, toolCall.args);
           downstreamAccepted = true;
-          if (toolCall.name === "play_card") combatSafety.cardsPlayed += 1;
+          if (isPlayCardAction(action)) combatSafety.cardsPlayed += 1;
           if (toolCall.name === "end_turn" && wait) {
             const started = Date.now();
             state = await waitForEndTurnSettlement(
@@ -1626,7 +1753,7 @@ async function safeExecuteActions(actions, wait = true, timeout = batchTimeoutMs
         halted: true,
         reason: "SAFETY enemy roster changed; remaining targeted actions were not executed because target_index values may have shifted",
         completed_actions: index + 1,
-        remaining_actions: remaining,
+        remaining_actions: remaining.map(publicAction),
         state: rememberAndCompact(state, false, { action: "act_many", completed: index + 1 }),
       };
     }
@@ -1635,15 +1762,15 @@ async function safeExecuteActions(actions, wait = true, timeout = batchTimeoutMs
         halted: true,
         reason: "SAFETY turn changed before the batch ended; remaining actions were not executed",
         completed_actions: index + 1,
-        remaining_actions: remaining,
+        remaining_actions: remaining.map(publicAction),
         state: rememberAndCompact(state, false, { action: "act_many", completed: index + 1 }),
       };
     }
   }
 
   return rememberAndCompact(state, false, {
-    action: "act_many",
-    completed: normalizedActions.length,
+    ...(single ? actionSummary(normalizedActions[0])
+      : { action: "act_many", completed: normalizedActions.length }),
     settlement: "verified",
     timeout_ms: timeout,
   });
@@ -1651,6 +1778,7 @@ async function safeExecuteActions(actions, wait = true, timeout = batchTimeoutMs
 
 async function callAndSettle(name, args = {}, wait = true, timeout = timeoutMs) {
   if (name === "execute_actions") return safeExecuteActions(args.actions ?? [], wait, timeout);
+  if (name === "play_card") return safeExecuteActions([{ action: "play_card", ...args }], wait, timeout, true);
   let callArgs = { ...args };
   const summaryArgs = { ...args };
   let callState;
@@ -1734,6 +1862,81 @@ async function runSafetySelfTests() {
     }
     throw new Error(`Self-test failed: ${label} did not reject`);
   };
+
+  const copyState = {
+    floor: 50, room_phase: "COMBAT", current_energy: 1,
+    combat_detail: { turn: 3 },
+    hand: [
+      { id: "EmptyBody", name: "化体为空", uuid: "body-expensive", cost: 3, block: 7, is_playable: false },
+      { id: "Strike_P", name: "打击", uuid: "strike", cost: 0, damage: 6 },
+      { id: "EmptyBody", name: "化体为空", uuid: "body-cheap", cost: 0, block: 7, is_playable: true },
+    ],
+  };
+  const initialCopies = compactState(copyState).hand;
+  const cheapKey = initialCopies[2].k;
+  if (!cheapKey || initialCopies[0].k === cheapKey || initialCopies[2].i !== 3) {
+    throw new Error("Self-test failed: compact hand omitted distinct copy handles and actual positions");
+  }
+  const cheapest = resolvePlayCardAction(copyState, { action: "play_card", card_name: "化体为空" });
+  if (cheapest.action.card_uuid !== "body-cheap" || cheapest.toolCall.name !== "execute_actions"
+      || cheapest.toolCall.args.actions[0].card_uuid !== "body-cheap"
+      || "card_index" in cheapest.toolCall.args.actions[0]) {
+    throw new Error("Self-test failed: same-name play did not select the cheapest playable copy by UUID");
+  }
+  const bound = normalizeStableCardReference({ action: "play_card", card_index: 3 }, copyState);
+  const reorderedCopies = { ...copyState, hand: [copyState.hand[2], copyState.hand[0]] };
+  if (bound.card_uuid !== "body-cheap" || bound.card_name
+      || resolvePlayCardAction(reorderedCopies, bound).action.card_index !== 1
+      || resolvePlayCardAction(reorderedCopies, { action: "play_card", card: cheapKey }).action.card_uuid !== "body-cheap") {
+    throw new Error("Self-test failed: indexed/handle actions did not preserve the instance through reindexing");
+  }
+  expectThrow("missing exact instance must not fall back to its name", () => resolvePlayCardAction(
+    { ...copyState, hand: [copyState.hand[0]] }, bound,
+  ));
+  expectThrow("a spent batch card must not switch to a second copy", () => resolvePlayCardAction(
+    { ...copyState, hand: [{ ...copyState.hand[0], cost: 0, is_playable: true }] }, bound,
+  ));
+  expectThrow("bound cost increase", () => resolvePlayCardAction(
+    { ...copyState, hand: [{ ...copyState.hand[2], cost: 1 }] }, bound,
+  ));
+  expectThrow("unknown short handle", () => resolvePlayCardAction(copyState, { action: "play_card", card: "h99999" }));
+  expectThrow("same name with different effects", () => resolvePlayCardAction(
+    { ...copyState, hand: [copyState.hand[2], { ...copyState.hand[2], uuid: "modified", block: 20 }] },
+    { action: "play_card", card_name: "化体为空" },
+  ));
+  expectThrow("multiple selectors", () => normalizeStableCardReference(
+    { action: "play_card", card: cheapKey, card_name: "化体为空" }, copyState,
+  ));
+  const costChangedCopies = { ...copyState, hand: [
+    { ...copyState.hand[2], cost: 1 }, { ...copyState.hand[0], cost: 0, is_playable: true }, copyState.hand[1],
+  ] };
+  const preciseDelta = handArrayDifference(initialCopies, compactState(costChangedCopies).hand);
+  if (preciseDelta.changed.find((item) => item.key === cheapKey)?.c !== 1
+      || preciseDelta.changed.find((item) => item.key === cheapKey)?.i !== 1
+      || preciseDelta.added || preciseDelta.removed) {
+    throw new Error("Self-test failed: duplicate cost/position changes were assigned to the wrong copy");
+  }
+  const reconstructed = new Map(initialCopies.map((card) => [card.k, { ...card }]));
+  for (const { key, ...patch } of preciseDelta.changed ?? []) {
+    const card = reconstructed.get(key);
+    for (const [field, value] of Object.entries(patch)) {
+      if (value === null) delete card[field];
+      else card[field] = value;
+    }
+  }
+  if (JSON.stringify([...reconstructed.values()].sort((a, b) => a.i - b.i))
+      !== JSON.stringify(compactState(costChangedCopies).hand)) {
+    throw new Error("Self-test failed: instance-keyed delta did not reconstruct the complete ordered hand");
+  }
+  if (publicAction(bound).card !== cheapKey || "card_uuid" in publicAction(bound)) {
+    throw new Error("Self-test failed: recovery actions leaked internal UUID bookkeeping");
+  }
+  const removedCopies = handArrayDifference(initialCopies, compactState(reorderedCopies).hand);
+  if (removedCopies.count !== 2 || removedCopies.removed[0].k !== initialCopies[1].k
+      || removedCopies.changed.find((item) => item.key === cheapKey)?.i !== 1) {
+    throw new Error("Self-test failed: exact removal and actual hand reindex were not recoverable");
+  }
+  resetCardCatalog();
 
   let observedVisualDelay = -1;
   let visualRefreshes = 0;
@@ -2538,7 +2741,8 @@ const ACTION_PROPERTIES = {
     type: "string",
     enum: ["play_card", "end_turn", "choose", "proceed", "skip", "cancel", "confirm", "use_potion", "discard_potion"],
   },
-  card_name: { type: "string" },
+  card: { type: "string", description: "Hand handle k for an exact copy, or card name to select the cheapest playable equivalent copy." },
+  card_name: { type: "string", description: "Selects the cheapest playable same-effect copy; use card with hand k for an exact copy." },
   card_id: { type: "string" },
   card_index: { type: "integer", minimum: 1 },
   target_index: { type: "integer", minimum: 1 },
@@ -2582,7 +2786,7 @@ const PLUGIN_TOOLS = [
   },
   {
     name: "act",
-    description: "Perform one safe action and return an action receipt plus settled semantic changes. Reindexing choice screens accept choice_text or choice_uuid; shops require choice_text. end_turn waits for the next turn and rejects duplicates.",
+    description: "Perform one settled action. Use card with a hand handle k for an exact copy, or card_name to choose the cheapest playable equivalent. Copilot resolves UUIDs and checks cost internally. Choices use choice_text or choice_uuid; shops require choice_text. Never resend uncertain end_turn.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2597,7 +2801,7 @@ const PLUGIN_TOOLS = [
   },
   {
     name: "act_many",
-    description: "Execute a short safe sequence serially and return settled semantic changes. Every action is polled against one shared per-action deadline and must expose an observable result before the next action starts. Each choice_text or choice_uuid is re-resolved against fresh state; stops if the turn or enemy roster changes. Failures distinguish action_error, verification_error, and verification_timeout; uncertain accepted actions are never resent. Send lethal targeted attacks separately.",
+    description: "Execute a short serial sequence. Use card with hand k for exact copies or names for cheapest playable equivalents; card_index refers to the last observed hand, never shifting intermediate positions. Copilot rechecks each step by UUID and waits for observable settlement. Stops on turn/target changes or errors; uncertain accepted actions are never resent.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2779,7 +2983,7 @@ async function handleMcpMessage(message) {
         protocolVersion: params.protocolVersion ?? "2024-11-05",
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: "spire-copilot", version: pluginVersion },
-        instructions: "Read get_state before acting and apply any contextual advisories before choosing actions. Card definitions are sent once and later states use refs; use inspect_card to verify one effect without requesting full state. Use act for normal play and act_many only for short safe sequences. Resolve changing card choices with choice_text or choice_uuid; shops require choice_text. Never resend end_turn after timeout; read state instead.",
+        instructions: "Read get_state and apply advisories. Use card with hand k for exact copies or card_name for cheapest playable equivalents; Copilot handles UUID matching and reindexing. Hand changes update key=k, not effect ref. Use act_many only for short safe sequences. Choices use choice_text or choice_uuid; shops require choice_text. Never resend uncertain end_turn; inspect state instead.",
       },
     };
   }
