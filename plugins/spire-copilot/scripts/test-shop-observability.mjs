@@ -144,7 +144,7 @@ try {
 
   state = { in_game: true, ready_for_command: true, floor: 5, room_phase: "COMBAT",
     screen_type: "NONE", room_type: "MonsterRoom", current_hp: 50, max_hp: 50, current_energy: 3, max_energy: 3,
-    hand: [card("Eruption", "暴怒", 0), { ...card("EmptyBody", "化体为空", 0), cost: 3, type: "SKILL" }],
+    hand: [card("Eruption", "暴怒", 0), { ...card("EmptyBody", "化体为空", 0), cost: 3, type: "SKILL", is_playable: false }],
     combat_detail: { turn: 1, player: { block: 0 } },
     monsters: [{ id: "Enemy", name: "Enemy", current_hp: 100, max_hp: 100, intent: "ATTACK", move: { damage: 38 },
       powers: [{ id: "Poison", amount: 2 }] }] };
@@ -154,8 +154,34 @@ try {
   assert.ok(combat.advisories.some((item) => item.id === "incoming-damage"));
   assert.ok(combat.advisories.some((item) => item.id === "poison-timing"));
   assert.ok(combat.advisories.some((item) => item.id === "live-card-cost"));
+  assert.ok(combat.advisories.some((item) => item.id === "hand-playability"));
   assert.equal(combat.hand[1].c, 3);
+  assert.equal(combat.hand[1].p, false);
   assert.equal(combat.card_defs["EmptyBody@0"].c, 1);
+  const inspected = await call("inspect_card", { card_id: "EmptyBody" });
+  assert.equal(inspected.instances.find((item) => item.zone === "hand").playable, false);
+  assert.equal(Object.hasOwn(inspected.definition, "playable"), false);
+  state.hand[1].cost = 2;
+  const costPatch = await call("get_state", { mode: "delta" });
+  assert.equal(costPatch.delta.hand.changed[0].c, 2);
+  assert.equal(Object.hasOwn(costPatch.delta.hand.changed[0], "p"), false, "wire omission retains blocked marker");
+  assert.equal(costPatch.advisories, undefined);
+  state.hand[1].is_playable = true;
+  const recovered = await call("get_state", { mode: "delta" });
+  assert.equal(recovered.delta.hand.changed[0].p, null);
+  assert.equal(recovered.advisories, undefined);
+  state.hand[1].is_playable = false;
+  const blocked = await call("get_state", { mode: "delta" });
+  assert.equal(blocked.delta.hand.changed[0].p, false);
+  delete state.hand[1].is_playable;
+  const unknownFlag = await call("get_state", { mode: "delta" });
+  assert.equal(unknownFlag.delta.hand.changed[0].p, null, "missing raw flag clears negative-only marker, not positive proof");
+  state.hand[1].is_playable = true;
+  state.hand[1].cost = 3;
+  const candidate = await call("get_state");
+  assert.equal(Object.hasOwn(candidate.hand[1], "p"), false);
+  assert.equal(candidate.advisories, undefined);
+  assert.equal(sent.length, 2, "inspection and state checks never mutate the isolated game");
   const wrath = await call("act", { action: "play_card", card_name: "暴怒" });
   assert.equal(wrath.current.stance, "Wrath");
   assert.equal(wrath.changes.stance, "Wrath");
@@ -171,7 +197,7 @@ try {
   assert.equal(neutral.changes.enemies.changed[0].atk, 38);
   assert.equal(neutral.result.execution_certainty, "verified");
   assert.equal(sent.length, 4);
-  console.log("Shop/observability integration passed: affordable-item identity, reindex guards, duplicate potion slots, compact rereads, and Neutral/Wrath action/delta snapshots.");
+  console.log("Shop/observability integration passed: affordable-item identity, reindex guards, duplicate potion slots, negative-only playability wire transitions, first-hand hint, and Neutral/Wrath action/delta snapshots.");
 } finally {
   for (const entry of pending.values()) clearTimeout(entry.timer);
   child.stdin.end(); child.kill(); lines.close();

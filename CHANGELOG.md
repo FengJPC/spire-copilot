@@ -2,6 +2,28 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.24] - 2026-10-03
+
+### Added
+
+- An independent `hand-playability` advisory at the first nonempty combat hand,
+  once per connection and re-emitted after reconnect. It does not require a
+  cost mismatch or Confusion, and does not repeat each turn or combat.
+- Unit and stdio/HTTP regressions for negative-only markers, missing upstream
+  flags, false-to-candidate/candidate-to-false transitions, delta omission vs
+  explicit null clearing, and delayed/deduplicated advisory delivery.
+
+### Clarified
+
+- Mandatory contract and detailed reference keep sentinel exceptions adjacent
+  to live playability semantics: `p: false` blocks play, while omission in a
+  full hand/choice snapshot is a candidate, not positive authoritative evidence.
+  Upstream true and missing flags compress alike; delta omission retains the
+  previous marker, and `p: null` clears it.
+- Other instance payloads use `playable: false`. `inspect_pile` exposes neither
+  playability marker and cannot establish whether an off-hand card can be played.
+- Action selection, guards, execution and settlement behavior are unchanged.
+
 ## [0.2.23] - 2026-10-03
 
 ### Clarified

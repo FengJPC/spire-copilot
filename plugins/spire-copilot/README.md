@@ -76,5 +76,13 @@ relevant special mechanic first appears, including supported boss openings,
 per-hit retaliation, Normality, unsafe Wrath turns, and Coffee Dripper at Rest
 sites. Unknown Mod encounters remain state-driven rather than guessed.
 
+The first nonempty combat hand also emits a `hand-playability` interface hint,
+once per connection (re-emitted after reconnect), independent of cost changes.
+Full hand/choice entries use negative-only `p: false`; omission makes a runtime
+candidate, not an authoritative guarantee. Delta omission retains the old
+value; `p: null` clears the old negative marker. Other instance payloads use
+`playable: false`; pile queries deliberately expose neither playability marker.
+X/unplayable cost sentinels never replace live flags and action validation.
+
 The in-game `MCP The Spire` mod must remain enabled because it provides the
 downstream game endpoint.

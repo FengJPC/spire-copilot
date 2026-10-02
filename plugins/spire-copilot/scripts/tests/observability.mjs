@@ -54,6 +54,64 @@ for (const cost of [-1, -2]) {
   assert.equal(allowed.p, undefined);
   assert.equal(runtime.modules.cards.playableHandCard({ ...hit, cost, is_playable: true }, { current_energy: 0 }), true);
 }
+// Full snapshots omit both positive and unknown flags. Patches must retain a
+// previous negative marker on omission, and explicitly clear it on recovery.
+const playability = createRuntime({ env: {} });
+const liveCard = { ...hit, uuid: "playability-copy", is_playable: false };
+const liveState = { in_game: true, floor: 1, room_phase: "COMBAT", screen_type: "NONE",
+  current_energy: 3, hand: [liveCard], monsters: [], combat_detail: { turn: 1, player: {} } };
+const liveHand = (extra) => playability.modules.compaction.compactState({ ...liveState,
+  hand: [{ ...liveCard, ...extra }] }).hand;
+const blockedHand = liveHand({});
+const allowedHand = liveHand({ is_playable: true });
+const missingHand = liveHand({ is_playable: undefined });
+assert.equal(blockedHand[0].p, false);
+assert.equal(Object.hasOwn(allowedHand[0], "p"), false);
+assert.deepEqual(missingHand, allowedHand, "true and unavailable upstream flags compress alike");
+assert.equal(playability.modules.cards.playableHandCard({ ...liveCard, is_playable: undefined }, liveState), true,
+  "missing upstream flag remains a candidate, not a new fail-closed rule");
+const handDiff = playability.modules.compaction.handArrayDifference;
+for (const candidate of [allowedHand, missingHand]) {
+  assert.equal(handDiff(blockedHand, candidate).changed[0].p, null, "explicitly clear stale negative marker");
+  assert.equal(handDiff(candidate, blockedHand).changed[0].p, false);
+}
+const costPatch = handDiff(blockedHand, liveHand({ cost: 0 })).changed[0];
+assert.equal(Object.hasOwn(costPatch, "p"), false);
+assert.equal({ ...blockedHand[0], ...costPatch }.p, false, "delta omission retains blocked status");
+const recovered = { ...blockedHand[0], ...handDiff(blockedHand, allowedHand).changed[0] };
+if (recovered.p === null) delete recovered.p;
+delete recovered.key;
+assert.deepEqual(recovered, allowedHand[0], "clear then reconstruct the exact full snapshot");
+for (const flag of [false, true, undefined]) {
+  const instance = { ...liveCard, is_playable: flag };
+  const choice = playability.modules.compaction.compactChoiceCard(instance);
+  const inspected = playability.modules.cards.compactCardInstance(instance, "hand");
+  assert.equal(choice.p, flag === false ? false : undefined);
+  assert.equal(inspected.playable, flag === false ? false : undefined);
+  assert.equal(Object.hasOwn(inspected, "p"), false, "instance payload has its documented alias");
+}
+
+// A plain, unmodified hand gets the interface hint too. Empty/incomplete and
+// non-combat frames do not consume it; floor/turn changes do not repeat it.
+const hintRuntime = createRuntime({ env: {} });
+const hintReceipt = (state) => hintRuntime.modules.compaction.rememberAndCompact(state);
+const hints = (receipt) => (receipt.advisories ?? []).filter((item) => item.id === "hand-playability");
+for (const state of [{ ...liveState, room_phase: "COMPLETE" },
+  { ...liveState, hand: undefined }, { ...liveState, hand: [] },
+  { ...liveState, combat_detail: {} }]) assert.deepEqual(hints(hintReceipt(state)), []);
+const firstHint = hintReceipt(liveState);
+assert.equal(hints(firstHint).length, 1);
+assert.equal((firstHint.advisories ?? []).some((item) => item.id === "live-card-cost"), false);
+for (const phrase of ["p=false", "p=null", "playable=false", "inspect_pile", "c=-1", "c=-2", "not proof"]) {
+  assert.ok(hints(firstHint)[0].text.includes(phrase), `hint covers ${phrase}`);
+}
+for (const state of [liveState, { ...liveState, combat_detail: { turn: 2, player: {} } },
+  { ...liveState, floor: 2 }]) assert.deepEqual(hints(hintReceipt(state)), []);
+hintRuntime.modules.transport.resetGameConnection();
+assert.equal(hints(hintReceipt(liveState)).length, 1, "reconnect resets interface hint cache");
+assert.equal(hints(createRuntime({ env: {} }).modules.compaction.rememberAndCompact(liveState)).length, 1,
+  "each runtime has an independent interface cache");
+
 const card = (id, name, price, extra = {}) => ({ id, name, price, uuid: `uuid-${id}`, cost: 0, type: "ATTACK", ...extra });
 const shop = { in_game: true, floor: 4, screen_type: "SHOP_SCREEN", room_phase: "COMPLETE", gold: 100,
   choice_list: ["purge (75 gold)", "[迂回] Cost: 0 ATTACK (87 gold)",
@@ -209,4 +267,4 @@ assert.equal(relevant(createRuntime({ env: {} }).modules.safety.collectContextAd
   combat_detail: { turn: 1, player: { powers: [{ id: "Confusion" }] } } }))[0].id, "live-card-cost");
 assert.deepEqual(relevant(createRuntime({ env: {} }).modules.safety.collectContextAdvisories({ ...poisoned,
   room_phase: "COMPLETE" })), [], "no combat explanation outside combat");
-console.log("Observability tests passed: sparse/scalar/zero/unknown ed, negative costs/playability, shop identity, potion slots, stance/intent semantics, and context-triggered advisories.");
+console.log("Observability tests passed: sparse/scalar/zero/unknown ed, negative-only playability snapshots/patches, first-hand hint lifecycle, shop identity, potion slots, stance/intent semantics, and context-triggered advisories.");

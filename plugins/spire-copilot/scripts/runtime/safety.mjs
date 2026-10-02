@@ -19,7 +19,8 @@ export function createSafety({ config, session }, dependencies = {}) {
     const floor = Number.isFinite(state?.floor) ? state.floor : "unknown";
     const turn = Number.isFinite(state?.combat_detail?.turn) ? state.combat_detail.turn : "unknown";
     const add = (scope, id, text) => {
-      const key = `${floor}:${scope}:${id}`;
+      // Interface semantics are once per connection, not once per floor.
+      const key = scope === "interface" ? `${scope}:${id}` : `${floor}:${scope}:${id}`;
       if (session.advisoryKeys.has(key)) return;
       session.advisoryKeys.add(key);
       advisories.push({ id, text });
@@ -31,6 +32,10 @@ export function createSafety({ config, session }, dependencies = {}) {
 
     if (state?.room_phase !== "COMBAT" || !Number.isFinite(state?.combat_detail?.turn)) {
       return advisories;
+    }
+
+    if (Array.isArray(state.hand) && state.hand.length) {
+      add("interface", "hand-playability", "In a full hand/choice snapshot, p=false means observed unplayable; omitted p is a candidate, not proof (upstream true and missing flags compress alike). In deltas, omitted p retains the old value; p=null clears the old negative marker. Other instance payloads use playable=false; inspect_pile exposes neither marker and cannot establish playability. c=-1 is X-cost (normally all current Energy); c=-2 is the unplayable marker, not negative spending. Special card/free-play effects may alter spending or permit play; check live flags/costs and runtime validation, never the sentinel alone.");
     }
 
     const enemies = liveMonsters(state);
