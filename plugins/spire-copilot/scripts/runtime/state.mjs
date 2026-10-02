@@ -127,7 +127,7 @@ export function createState({ config, session }, dependencies = {}) {
         boss: game.act_boss,
         deck: game.deck ?? [],
         relics: game.relics ?? [],
-        potions: game.potions ?? [],
+        ...(Array.isArray(game.potions) ? { potions: game.potions } : {}),
       },
     };
     const combat = game.combat_state;

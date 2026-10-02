@@ -110,12 +110,28 @@ export function createCompaction({ config, session }, dependencies = {}) {
     };
   }
 
-  function compactPotion(potion, index) {
+  function compactPotion(potion, index, includeAvailability = false) {
     return {
       slot: index + 1,
       id: potion.id,
       n: potion.name,
+      ...(potion.is_empty === true ? { empty: true } : {}),
+      ...(includeAvailability ? Object.fromEntries(
+        ["can_use", "can_discard", "requires_target"]
+          .filter((key) => typeof potion[key] === "boolean")
+          .map((key) => [key, potion[key]]),
+      ) : {}),
     };
+  }
+
+  function currentStance(state) {
+    const player = state?.combat_detail?.player;
+    if (state?.room_phase !== "COMBAT" || !player || typeof player !== "object" || Array.isArray(player)) return null;
+    const stance = player.stance;
+    // MCP The Spire omits stance only for Neutral in an available player object.
+    // Missing player data / non-combat states must not masquerade as Neutral.
+    if (stance === undefined) return "Neutral";
+    return typeof stance === "string" && stance.trim() ? stance : null;
   }
 
   function compactScreenCard(card) {
@@ -140,6 +156,42 @@ export function createCompaction({ config, session }, dependencies = {}) {
       ...(Number.isFinite(item.price) ? { price: item.price } : {}),
       ...(Number.isFinite(item.counter) && item.counter >= 0 ? { c: item.counter } : {}),
     };
+  }
+
+  function compactShopChoices(state) {
+    const details = state.screen_state ?? {};
+    const normalizedName = (name) => typeof name === "string" ? name.normalize("NFKC").trim() : undefined;
+    return state.choice_list.map((text, index) => {
+      const base = { i: index + 1, text };
+      if (typeof text !== "string") return base;
+      const priceMatch = text.match(/\((\d+)\s+gold\)\s*$/i);
+      const price = priceMatch ? Number(priceMatch[1]) : undefined;
+      if (/^purge\s*\(/i.test(text)) {
+        return { ...base, kind: "purge", ...(Number.isFinite(price) ? { price } : {}) };
+      }
+      const patterns = [
+        ["card", "cards", /^\[([^\]]+)\]\s+Cost:/i],
+        ["relic", "relics", /^relic:\s*\[([^\]]+)\]/i],
+        ["potion", "potions", /^add potion:\s*\[([^\]]+)\]/i],
+      ];
+      const matched = patterns.map(([kind, list, pattern]) => ({ kind, list, match: text.match(pattern) }))
+        .find((entry) => entry.match);
+      if (!matched) return base;
+      const { kind, list, match } = matched;
+      const tagged = { ...base, kind, ...(Number.isFinite(price) ? { price } : {}) };
+      // A zero-price card has no suffix in the upstream formatter. Missing
+      // prices on other item types cannot establish an identity safely.
+      const expectedPrice = price ?? (kind === "card" ? 0 : undefined);
+      const items = Array.isArray(details[list]) ? details[list] : [];
+      const candidates = items.filter((item) => normalizedName(item?.name) === normalizedName(match[1])
+        && Number.isFinite(expectedPrice) && item?.price === expectedPrice);
+      if (candidates.length !== 1) return tagged;
+      const item = candidates[0];
+      if (kind === "card") return { ...tagged,
+        ...(item.id ? { card_id: item.id } : {}),
+        ...(item.uuid ? { choice_uuid: item.uuid } : {}), ...compactChoiceCard(item) };
+      return { ...tagged, ...(item.id ? { item_id: item.id } : {}) };
+    });
   }
 
   function compactScreenDetails(state) {
@@ -204,7 +256,7 @@ export function createCompaction({ config, session }, dependencies = {}) {
       boss: run.boss,
       deck: (run.deck ?? []).map(compactDeckCard),
       relics: (run.relics ?? []).map(compactRelic),
-      potions: (run.potions ?? []).map(compactPotion),
+      potions: Array.isArray(run.potions) ? run.potions.map((potion, index) => compactPotion(potion, index)) : null,
     };
   }
 
@@ -220,11 +272,15 @@ export function createCompaction({ config, session }, dependencies = {}) {
     }
     if (Number.isFinite(state.gold)) out.gold = state.gold;
     if (Number.isFinite(state.current_energy)) out.energy = `${state.current_energy}/${state.max_energy}`;
+    if (state.in_game || state.run_detail) {
+      out.potions = Array.isArray(state.run_detail?.potions)
+        ? state.run_detail.potions.map((potion, index) => compactPotion(potion, index, true)) : null;
+    }
+    if (state.room_phase === "COMBAT") out.stance = currentStance(state);
     const detail = state.combat_detail;
     if (detail) {
       out.turn = detail.turn;
       if (detail.player?.block) out.block = detail.player.block;
-      if (detail.player?.stance) out.stance = detail.player.stance;
       if (detail.player?.powers?.length) {
         out.powers = detail.player.powers.map((power) => ({
           id: power.id,
@@ -244,7 +300,8 @@ export function createCompaction({ config, session }, dependencies = {}) {
         n: m.name,
         hp: `${m.current_hp}/${m.max_hp}`,
         intent: m.intent,
-        ...(m.move?.damage ? { atk: m.move.hits > 1 ? `${m.move.damage}x${m.move.hits}` : m.move.damage } : {}),
+        ...(Number.isFinite(m.move?.damage) && m.move.damage >= 0
+          ? { atk: m.move.hits > 1 ? `${m.move.damage}x${m.move.hits}` : m.move.damage } : {}),
         ...(Number.isFinite(m.block) && m.block ? { b: m.block } : {}),
         ...(m.powers?.length ? { powers: m.powers.map((power) => ({ id: power.id, ...(power.amount ? { n: power.amount } : {}) })) } : {}),
       }));
@@ -252,7 +309,7 @@ export function createCompaction({ config, session }, dependencies = {}) {
     if (Array.isArray(state.hand)) out.hand = state.hand.map((card, index) => ({ ...compactCard(card, state), i: index + 1 }));
     if (state.choice_list?.length) {
       const cards = choiceCards(state);
-      out.choices = state.choice_list.map((text, index) => ({
+      out.choices = state.screen_type === "SHOP_SCREEN" ? compactShopChoices(state) : state.choice_list.map((text, index) => ({
         i: index + 1,
         text,
         ...(cards[index]?.id ? { card_id: cards[index].id } : {}),
@@ -352,7 +409,7 @@ export function createCompaction({ config, session }, dependencies = {}) {
   }
 
   function entityArrayDifference(before, after) {
-    const keyFor = (item) => item?.i ?? item?.id ?? item?.slot;
+    const keyFor = (item) => item?.i ?? item?.slot ?? item?.id;
     const beforeMap = new Map(before.map((item) => [keyFor(item), item]));
     const afterMap = new Map(after.map((item) => [keyFor(item), item]));
     if ([...beforeMap.keys(), ...afterMap.keys()].some((key) => key === undefined)) return undefined;
@@ -419,16 +476,17 @@ export function createCompaction({ config, session }, dependencies = {}) {
     const definitionPayload = pendingCardDefinitionPayload();
     const advisories = collectContextAdvisories(state);
     const advisoryPayload = advisories.length ? { advisories } : {};
+    const current = { stance: currentStance(state) };
     session.previousState = compact;
     session.observedHandState = { floor: state.floor, turn: state?.combat_detail?.turn,
       hand: (state.hand ?? []).map((card) => ({ ...card })) };
     if (runContext) session.previousRunContext = runContext;
     if (includeMap) session.mapCache.emittedVersion = state.map_version;
     if (actionResult) {
-      return { result: actionResult, changes: change ?? {}, ...runPayload, ...definitionPayload, ...advisoryPayload };
+      return { result: actionResult, current, changes: change ?? {}, ...runPayload, ...definitionPayload, ...advisoryPayload };
     }
     return deltaOnly
-      ? { delta: change ?? {}, ...runPayload, ...definitionPayload, ...advisoryPayload }
+      ? { delta: change ?? {}, current, ...runPayload, ...definitionPayload, ...advisoryPayload }
       : { ...compact, ...runPayload, ...definitionPayload, ...advisoryPayload };
   }
 
@@ -444,8 +502,10 @@ export function createCompaction({ config, session }, dependencies = {}) {
     compactDeckCard,
     compactRelic,
     compactPotion,
+    currentStance,
     compactScreenCard,
     compactStoreItem,
+    compactShopChoices,
     compactScreenDetails,
     compactRunContext,
     compactState,

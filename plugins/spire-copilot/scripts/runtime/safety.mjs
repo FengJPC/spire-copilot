@@ -35,6 +35,9 @@ export function createSafety({ config, session }, dependencies = {}) {
     const enemies = liveMonsters(state);
     const enemyMatches = (identities) => enemies.some((enemy) => entityMatches(enemy, identities));
     const enemyHasPower = (identities) => enemies.some((enemy) => entityHasPower(enemy, identities));
+    if (enemies.some((enemy) => Number.isFinite(enemy.move?.damage) && enemy.move.damage >= 0)) {
+      add("combat", "incoming-damage", "Enemy atk is the game's current displayed intent damage per hit, already adjusted for stance including Wrath; do not double it again. AxN means A damage on each of N hits, before your Block, not guaranteed HP loss. Refresh after changing stance; unusual Mod mechanics may alter actual damage.");
+    }
     const thorns = enemies.flatMap((enemy) => (enemy.powers ?? [])
       .filter((power) => entityMatches(power, ["Thorns", "Sharp Hide", "尖刺", "锋利外壳"]))
       .map((power) => Number(power.amount) || 0));

@@ -1,0 +1,117 @@
+import assert from "node:assert/strict";
+import { createRuntime } from "../runtime/index.mjs";
+
+const runtime = createRuntime({ env: {} });
+const metadata = await runtime.handleMcpMessage({ jsonrpc: "2.0", id: 1, method: "initialize" });
+assert.ok(metadata.result.instructions.includes("one by one"));
+assert.ok(metadata.result.instructions.includes("current.stance"));
+const catalog = await runtime.handleMcpMessage({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+assert.ok(catalog.result.tools.find((tool) => tool.name === "act_many").description.includes("before sending"));
+const { compactState, compactShopChoices, rememberAndCompact, currentStance } = runtime.modules.compaction;
+const card = (id, name, price, extra = {}) => ({ id, name, price, uuid: `uuid-${id}`, cost: 0, type: "ATTACK", ...extra });
+const shop = { in_game: true, floor: 4, screen_type: "SHOP_SCREEN", room_phase: "COMPLETE", gold: 100,
+  choice_list: ["purge (75 gold)", "[迂回] Cost: 0 ATTACK (87 gold)",
+    "relic: [迂回] description(50 gold)", "add potion: [迂回] description(40 gold)"],
+  screen_state: {
+    cards: [card("ReachHeaven", "通天", 150), card("Affordable", "迂回", 87)],
+    relics: [{ id: "Relic", name: "迂回", price: 50 }],
+    potions: [{ id: "Potion", name: "迂回", price: 40 }], purge_cost: 75, purge_available: true,
+  } };
+const choices = compactShopChoices(shop);
+assert.equal(choices[0].kind, "purge");
+assert.equal(choices[1].card_id, "Affordable");
+assert.equal(choices[1].ref, "Affordable@0");
+assert.equal(choices[1].choice_uuid, "uuid-Affordable");
+assert.equal(choices[2].item_id, "Relic");
+assert.equal(choices[3].item_id, "Potion");
+for (const index of [0, 2, 3]) {
+  for (const key of ["card_id", "ref", "choice_uuid", "d", "c"]) assert.equal(choices[index][key], undefined);
+}
+
+// Permutations, purchase-driven filtering and removal of purge change indices,
+// never the association. Details keep all items, including unaffordable cards.
+for (const texts of [shop.choice_list.slice().reverse(), shop.choice_list.slice(1),
+  [shop.choice_list[3], shop.choice_list[1]], [shop.choice_list[1]]]) {
+  const result = compactShopChoices({ ...shop, choice_list: texts,
+    screen_state: { ...shop.screen_state, cards: shop.screen_state.cards.slice().reverse() } });
+  result.forEach((entry, index) => {
+    assert.equal(entry.i, index + 1);
+    const expected = choices.find((choice) => choice.text === entry.text);
+    assert.deepEqual({ ...entry, i: expected.i }, expected);
+  });
+}
+assert.equal(compactState(shop).details.cards.length, 2, "preserve the canonical complete shop details");
+
+// Mismatches, collisions, missing details and unrecognized Mod formatting fail
+// closed rather than falling back to another array's positional card.
+const badShops = [
+  { ...shop, screen_state: {} },
+  { ...shop, screen_state: { cards: [card("A", "迂回", 88)] } },
+  { ...shop, screen_state: { cards: [card("A", "迂回", 87), card("B", "迂回", 87)] } },
+  { ...shop, screen_state: { cards: [card("A", "迂回+", 87)] } },
+];
+for (const snapshot of badShops) {
+  const item = compactShopChoices(snapshot)[1];
+  for (const key of ["card_id", "ref", "choice_uuid"]) assert.equal(item[key], undefined);
+}
+const otherText = { ...shop, choice_list: ["Unknown Mod option", "[通天] Cost: 0 ATTACK (87 gold)"] };
+assert.ok(compactShopChoices(otherText).every((item) => item.card_id === undefined));
+assert.equal(compactShopChoices({ ...shop, choice_list: ["[免费牌] Cost: 0 ATTACK"],
+  screen_state: { cards: [card("Free", "免费牌", 0)] } })[0].card_id, "Free");
+assert.equal(compactShopChoices({ ...shop, choice_list: ["[迂回] Cost: 0 ATTACK (90 gold)"],
+  screen_state: { cards: [card("A", "迂回", 87), card("B", "迂回", 90)] } })[0].card_id, "B");
+
+// Non-shop UUID choices retain the established shape and meaning.
+const grid = compactState({ screen_type: "GRID", choice_list: ["迂回"],
+  screen_state: { cards: [shop.screen_state.cards[1]] } });
+assert.equal(grid.choices[0].card_id, "Affordable");
+assert.equal(grid.choices[0].kind, undefined);
+
+const potions = [{ id: "P", name: "同名药水", can_use: true, requires_target: true },
+  { id: "P", name: "同名药水", can_discard: true }, { id: "Potion Slot", name: "空槽", is_empty: true }];
+const combat = { in_game: true, floor: 5, room_phase: "COMBAT", screen_type: "NONE", hand: [],
+  combat_detail: { turn: 1, player: { stance: "Wrath" } }, run_detail: { potions },
+  monsters: [{ id: "Enemy", current_hp: 40, move: { damage: 76, hits: 2 } }] };
+rememberAndCompact(combat);
+const compact = rememberAndCompact(combat);
+assert.equal(compact.run_context, undefined);
+assert.equal(compact.potions.length, 3, "repeated compact still has all current potion slots");
+assert.equal(compact.potions[2].empty, true);
+assert.equal(compact.potions[0].can_use, true);
+assert.equal(compact.potions[0].requires_target, true);
+assert.equal(compact.potions[1].slot, 2);
+assert.equal(compact.stance, "Wrath");
+assert.equal(compact.enemies[0].atk, "76x2", "never multiply the upstream stance-adjusted intent again");
+const unchanged = rememberAndCompact(combat, false, { action: "example" });
+assert.deepEqual(unchanged.changes, {});
+assert.deepEqual(unchanged.current, { stance: "Wrath" });
+assert.deepEqual(rememberAndCompact(combat, true).current, { stance: "Wrath" });
+
+const changed = rememberAndCompact({ ...combat, combat_detail: { turn: 1, player: {} },
+  run_detail: { potions: [potions[0], potions[2], potions[2]] } }, false, { action: "example" });
+assert.equal(changed.current.stance, "Neutral");
+assert.equal(changed.changes.stance, "Neutral");
+assert.deepEqual(changed.changes.potions.changed.map((item) => item.key), [2]);
+assert.deepEqual(changed.run_delta.potion_changes.changed.map((item) => item.key), [2]);
+assert.equal(compactState({ ...combat, run_detail: {} }).potions, null);
+assert.deepEqual(compactState({ ...combat, run_detail: { potions: [] } }).potions, []);
+assert.equal(currentStance({ ...combat, combat_detail: {} }), null);
+assert.equal(currentStance({ ...combat, combat_detail: { player: "malformed" } }), null);
+assert.equal(currentStance({ ...combat, combat_detail: { player: { stance: null } } }), null);
+assert.equal(currentStance({ ...combat, combat_detail: { player: { stance: "ModStance" } } }), "ModStance");
+assert.equal(rememberAndCompact({ ...combat, room_phase: "COMPLETE", combat_detail: undefined },
+  false, { action: "example" }).current.stance, null);
+assert.equal(compactState({ ...combat, monsters: [{ move: { damage: 0, hits: 3 } }] }).enemies[0].atk, "0x3");
+
+// The damage advisory appears once per combat, including zero-damage intent,
+// without changing the existing stance warning or execution guards.
+const fresh = createRuntime({ env: {} });
+const advisories = fresh.modules.safety.collectContextAdvisories({ ...combat,
+  monsters: [{ id: "Enemy", intent: "ATTACK", move: { damage: 0 } }] });
+assert.ok(advisories.some((item) => item.id === "incoming-damage"));
+assert.ok(advisories.some((item) => item.id === "wrath-incoming"));
+assert.equal(fresh.modules.safety.collectContextAdvisories({ ...combat,
+  combat_detail: { turn: 2, player: { stance: "Wrath" } } }).filter((item) => item.id === "incoming-damage").length, 0);
+assert.equal(fresh.modules.safety.collectContextAdvisories({ ...combat, floor: 6 })
+  .filter((item) => item.id === "incoming-damage").length, 1);
+console.log("Observability tests passed: identity-aligned shop choices, fail-closed ambiguity, potion slots, explicit stance snapshots, and displayed intent semantics.");

@@ -1,7 +1,7 @@
 // Extracted unchanged regression fixtures; test state is instance-local.
 export function runSyntheticBenchmark(runtime) {
   const { session } = runtime;
-  const { compactState, diffValue, handArrayDifference, multisetDifference } = runtime.modules.compaction;
+  const { compactPotion, compactState, diffValue, handArrayDifference, multisetDifference } = runtime.modules.compaction;
 
   const before = {
     ready: true,
@@ -90,6 +90,11 @@ export function runSyntheticBenchmark(runtime) {
     stance_hand_legacy_delta_bytes: bytes(legacyStanceDelta),
     stance_hand_compact_delta_bytes: bytes(compactStanceDelta),
     stance_hand_reduction_percent: Number(((1 - bytes(compactStanceDelta) / bytes(legacyStanceDelta)) * 100).toFixed(1)),
+    current_stance_echo_bytes: bytes({ current: { stance: "Wrath" } }),
+    two_potion_slots_snapshot_bytes: bytes({ potions: [
+      { id: "EnergyPotion", name: "能量药水", can_use: true },
+      { id: "Potion Slot", name: "药水栏位", is_empty: true },
+    ].map((potion, index) => compactPotion(potion, index, true)) }),
     note: "Synthetic regression fixture; not a published real-run token claim",
   }, null, 2)}\n`);
 }

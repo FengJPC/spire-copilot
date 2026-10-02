@@ -34,6 +34,10 @@ Slay the Spire run. It adds a compact, safety-aware bridge in front of the
   relics.
 - Filtering of transient combat frames with incomplete hands or `DEBUG`
   intents.
+- Identity-aligned shop choices that never attach a positional card ID to
+  purge, relic, or potion items; ambiguous matches omit identity enrichment.
+- Current potion slots in every in-game compact snapshot, including empty
+  slots, and explicit Neutral/Wrath/Calm stance with small action/delta echoes.
 - Compact Watcher stance and complete player-power metadata, including
   negative amounts and newly applied statuses.
 - A Codex skill that explains pivotal decisions and pauses after each combat.
@@ -104,6 +108,33 @@ run was won. The unverified action is excluded from `completed_actions` and is
 never retried. When exact action evidence remains, normal `verified` receipts
 are retained, while later batch steps still stop at the combat boundary.
 
+Action and delta receipts carry `current.stance` independently of semantic
+changes. Unchanged stance is still observable without replaying the whole
+combat state; `null` means unavailable or outside combat. An available combat
+player with omitted neutral stance is explicitly `Neutral`. Compact snapshots
+also repeat current `potions` by slot (`empty: true` for empty slots); missing
+upstream inventory is `null`, not an invented empty array. Existing run context
+and potion deltas remain compatible, with duplicate potions keyed by slot.
+
+Shop `choices` are matched to canonical `details.cards/relics/potions` by type,
+name and price, not array offset or affordability-filtered position. Only unique
+card matches expose `card_id`, `ref`, and `choice_uuid`; other recognized items
+expose `kind` and, when matched, `item_id`. Ambiguous or unfamiliar formatting
+keeps text/index without invented identity. Purchases still require fresh,
+unique `choice_text` and retain all existing shop reindex guards.
+
+Enemy `atk` is upstream displayed intent damage per hit, already stance-adjusted
+(including Wrath), before player Block. `AxN` means A on each of N hits, not a
+total or guaranteed HP loss. A one-shot runtime advisory makes this explicit;
+Copilot never applies a second Wrath multiplier to the upstream intent.
+
+`act_many` sends and verifies each action separately. Whole-batch preflight can
+reject a predictable safety violation before any action is sent; runtime halts
+occur after individual actions, not after blindly executing the entire batch.
+Group already-decided actions, but inspect new draws/choices before planning
+the next decision. This release does not loosen guards, change mutation retry
+policy, or broaden transition verification to avoid animation timeouts.
+
 Development checks:
 
 ```powershell
@@ -117,7 +148,9 @@ synthetic byte benchmark. Individual checks remain available:
 ```powershell
 node plugins/spire-copilot/scripts/server.mjs --self-test
 node plugins/spire-copilot/scripts/tests/runtime-isolation.mjs
+node plugins/spire-copilot/scripts/tests/observability.mjs
 node plugins/spire-copilot/scripts/test-hand-actions.mjs
+node plugins/spire-copilot/scripts/test-shop-observability.mjs
 node plugins/spire-copilot/scripts/test-execution-certainty.mjs
 node plugins/spire-copilot/scripts/server.mjs --benchmark
 ```

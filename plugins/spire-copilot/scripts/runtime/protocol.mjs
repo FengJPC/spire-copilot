@@ -39,7 +39,7 @@ export function createProtocol({ config, session }, dependencies = {}) {
   const PLUGIN_TOOLS = [
     {
       name: "get_state",
-      description: "Read settled game state. compact sends run context and the full map once per run/act; delta returns semantic changes; full is diagnostic and verbose. Contextual advisories are emitted once when relevant mechanics first appear.",
+      description: "Read settled game state. compact includes current potion slots and combat stance; run context and the full map are sent once per run/act. delta returns semantic changes plus current.stance; full is diagnostic and verbose. Contextual advisories are emitted once when relevant mechanics first appear.",
       inputSchema: {
         type: "object",
         properties: { mode: { type: "string", enum: ["compact", "delta", "full"], default: "compact" } },
@@ -91,7 +91,7 @@ export function createProtocol({ config, session }, dependencies = {}) {
     },
     {
       name: "act_many",
-      description: "Execute a short serial sequence. Use card with hand k for exact copies or names for cheapest playable equivalents; card_index refers to the last observed hand, never shifting intermediate positions. Copilot rechecks each step by UUID and waits for observable settlement. Stops on turn/target changes or errors; uncertain accepted actions are never resent.",
+      description: "Execute already-decided actions serially; use act when the next decision needs fresh observation. Use card with hand k for exact copies or names for cheapest playable equivalents; card_index refers to the last observed hand, never shifting intermediate positions. Safety preflight may reject the whole batch before sending. Otherwise each action is rechecked by UUID and verified before continuing; unsafe boundaries or errors stop the suffix. Never plan through unknown draws/new choices or resend uncertain actions.",
       inputSchema: {
         type: "object",
         properties: {
@@ -201,7 +201,7 @@ export function createProtocol({ config, session }, dependencies = {}) {
           protocolVersion: params.protocolVersion ?? "2024-11-05",
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: "spire-copilot", version: pluginVersion },
-          instructions: "Read get_state and apply advisories. Use card with hand k for exact copies or card_name for cheapest playable equivalents; Copilot handles UUID matching and reindexing. Hand changes update key=k, not effect ref. Use act_many only for short safe sequences. Choices use choice_text or choice_uuid; shops require choice_text. Never resend uncertain end_turn; inspect state instead.",
+          instructions: "Read get_state and apply advisories. Read current.stance in action/delta receipts. Use card with hand k for exact copies or card_name for cheapest playable equivalents; Copilot handles UUID matching and reindexing. Hand changes update key=k, not effect ref. act_many verifies already-decided actions one by one; use act across observation boundaries. Choices use choice_text or choice_uuid; shops require choice_text. Never resend uncertain end_turn; inspect state instead.",
         },
       };
     }

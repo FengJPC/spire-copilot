@@ -566,6 +566,7 @@ export async function runSafetySelfTests(runtime) {
 
   const compactPlayerStatus = compactState({
     ready_for_command: true,
+    room_phase: "COMBAT",
     screen_type: "NONE",
     combat_detail: {
       turn: 3,

@@ -10,10 +10,10 @@ Use the `spire_copilot` tools for live state and actions.
 ## Workflow
 
 1. Call `get_state` with `mode: compact` before the first action and after any user-reported mismatch. Treat live state and explicit corrections as authoritative; all indices are 1-based.
-2. Apply any `advisories` before choosing actions. They are context-sensitive and normally emitted once when a mechanic first matters.
+2. Apply any `advisories` before choosing actions. They are context-sensitive and normally emitted once when a mechanic first matters. Read `current.stance` in action/delta receipts; do not infer stance from card damage.
 3. Use `inspect_card` when an effect is missing, unfamiliar, modified, or worth verifying. Prefer an exact `choice_uuid`, otherwise `card_id` plus upgrades; do not request full state just to inspect one card.
    Use `inspect_pile` with `pile: draw`, `discard`, or `exhaust` only when composition matters for draw, recovery, or cycle planning. It is unordered, not a prediction of the next draw; pile stats may change on entering hand.
-4. Use `card_name` for the cheapest playable same-effect copy, or `card` with a hand `k` for an exact copy; Copilot handles instance matching and reindexing. Prefer `act`; use `act_many` only for short sequences with stable turns, targets, and choices.
+4. Use `card_name` for the cheapest playable same-effect copy, or `card` with a hand `k` for an exact copy; Copilot handles instance matching and reindexing. Use `act` when the next decision needs a fresh observation; `act_many` can group already-decided actions with stable turns, targets, and choices. It verifies each action and stops at an unsafe boundary; never plan through unknown draws or new choices.
 5. Trust verified receipts and `changes`; `outcome_unknown`/`timeout_unknown` never mean not executed. Never replay completed or uncertain actions; read state instead. Send known-lethal targeted attacks separately before targeting remaining enemies. All actions verify settlement; `visual_wait` (legacy `wait`) controls pacing only.
 6. Resolve changing card choices by `choice_uuid` or unique `choice_text`; shops require `choice_text`. Never spend, buy, remove, or choose rewards from stale state.
 

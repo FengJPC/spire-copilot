@@ -2,6 +2,41 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.21] - 2026-10-03
+
+### Fixed
+
+- Match shop choice identity to the correct item type, unique name and price
+  rather than zipping affordable mixed choices with the complete card list.
+  Purge/relic/potion choices never inherit card IDs or refs; ambiguous matches
+  keep authoritative text without guessed identities. Preserve purchase guards.
+- Include current potion slots on every in-game compact reread, preserve empty
+  slots and supplied availability flags, and distinguish unknown inventory from
+  zero slots. Key same-ID potion deltas by slot instead of collapsing copies.
+- Report omitted upstream neutral stance explicitly when combat player data is
+  available; action/delta receipts echo `current.stance` even when unchanged.
+  Missing data and non-combat states remain null instead of invented Neutral.
+
+### Added
+
+- One-shot incoming-damage advisory explaining that `atk` is per-hit displayed
+  intent already adjusted for stance including Wrath, not guaranteed HP loss.
+  Preserve explicit zero-damage values without doubling upstream damage again.
+- Unit and isolated stdio/HTTP tests for shop filtering/reordering, ambiguous
+  identities, repeated compact potion reads, duplicate slots, stance transitions,
+  unchanged stance snapshots, and unchanged action safety protections.
+- Synthetic byte overhead measurements for the small stance echo and inventory
+  snapshot; these are not token estimates or measured real-run savings.
+
+### Documentation
+
+- Clarify per-action execution/verification versus whole-batch safety preflight.
+  Group already-decided actions rather than imposing a fixed batch length; keep
+  observation boundaries, no-blind-retry rules and all existing safety guards.
+  Keep MCP tool descriptions and initialization guidance aligned with the Skill.
+- Synchronize the skill's focused state/safety references. General reward/GRID
+  animation timeouts need traces and are not claimed fixed by this release.
+
 ## [0.2.20] - 2026-10-02
 
 ### Fixed

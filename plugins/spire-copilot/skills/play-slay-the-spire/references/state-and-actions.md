@@ -5,11 +5,15 @@ Read this reference only when compact fields are unclear, a state mismatch is re
 ## Compact state
 
 - The first compact state includes `run_context`; later deck, relic, and potion changes arrive in `run_delta`.
+- Every in-game compact snapshot includes current `potions` with 1-based `slot`, `id`, `n`, and `empty: true` for empty slots; supplied `can_use`, `can_discard`, and `requires_target` flags are retained. `potions: null` means unavailable, not an empty inventory; `[]` confirms zero slots. Same-ID potions remain distinct by slot. Use the latest compact inventory instead of reconstructing it from old run deltas when checking capacity.
+- In combat, `stance` explicitly reports `Neutral` when an available upstream player object omits its neutral stance. Action and delta receipts include `current.stance` even when unchanged; this is a snapshot, not a delta. `null` means non-combat or unavailable player/stance data, never permission to assume Neutral. Preserve unrecognized Mod stance names.
 - The first map state in an act includes the complete graph. Later states use `map_ref` plus current and next nodes; map nodes use `s` for the room symbol and `to` for child coordinates.
 - Initial cached card effects arrive in `card_defs`; newly encountered generated, rewarded, or Mod cards arrive once in `card_defs_added`. Hand and choice entries use `ref` plus live values.
 - In hand entries, `d` is current per-hit damage before target-only modifiers. `ed` is a target-adjusted per-hit estimate: a number for the sole enemy or an enemy-index map for multiple targets. Multiply by the hit count and still account for block and unusual Mod mechanics.
+- Enemy `atk` is the game's displayed intent damage, already adjusted for current stance (including Wrath). Do not double it again. `AxN` means A damage on each of N hits before player Block, not guaranteed HP loss. Missing `atk` is unknown/non-attacking intent, not proof of zero damage; explicit zero is preserved when supplied. Refresh after stance changes and consider additional powers/Mod mechanics.
 - Hand cards have a short instance handle `k` and their actual 1-based position `i`; `ref` identifies the shared effect definition, not a physical copy.
 - `hand.changed.key` identifies `k`; preserve omitted fields, remove by `removed[].k`, insert `added` cards, and order by `i`. Duplicate names and same-effect refs remain distinct.
+- Shop choices keep their authoritative `text` and `i`, with `kind` for recognized card/relic/potion/purge formats. Identity enrichment matches the appropriate `details` list by unique name and price, never by position. Only card items can have `card_id`/`ref`/`choice_uuid`; relics and potions use `item_id`. Missing identity means unmatched/ambiguous formatting or data; use `details` and fresh text rather than guessing. Shop actions still require unique `choice_text`, even if a card UUID is exposed for inspection.
 
 ## On-demand piles
 
@@ -35,4 +39,5 @@ Read this reference only when compact fields are unclear, a state mismatch is re
 - Never resend `end_turn` after a timeout or uncertain response. Read state; the original command may already have executed.
 - On card-selection screens, use the latest `choice_uuid` when names can repeat, otherwise a unique `choice_text`. Numeric indices can change after every selection. Shops always require `choice_text`.
 - Stable `choice_text` or `choice_uuid` actions may appear in `act_many`; the runtime resolves each against fresh state.
+- `act_many` dispatches one action and verifies its result before sending the next. Its whole-batch preflight can reject predictable Normality violations or lethal-then-retarget plans before any action is sent. After execution starts, unknown results, turn changes, choice-screen changes, combat completion, or unsafe target reindexing stop the suffix. Batch only actions whose decisions are already known; a conservative preflight rejection is not evidence of coarse post-execution verification.
 - If a batch returns `halted: true`, trust its completed count and observed changes. Do not replay completed or uncertain actions; inspect `failed_action_status` or `action_status` before handling an unverified item.
