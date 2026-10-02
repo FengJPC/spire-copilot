@@ -48,7 +48,7 @@ export function createSafety({ config, session }, dependencies = {}) {
         && Number.isFinite(definition?.c) && definition.c >= 0 && card.cost !== definition.c;
     });
     if (changedCost || entityHasPower(player, ["Confusion", "混乱"])) {
-      add("combat", "live-card-cost", "Hand c is the live current-turn cost; card_defs c is the printed/upgraded baseline. Differences can be legitimate cost modification, not automatically bad Mod data. Budget live costs and playability, refresh after draw/cost changes, and do not infer the cause from a mismatch alone. Negative X-cost/unplayable sentinels are not ordinary numeric costs.");
+      add("combat", "live-card-cost", "Hand c is the live current-turn cost; card_defs c is the printed/upgraded baseline. Differences can be legitimate cost modification, not automatically bad Mod data. Budget live costs and playability, refresh after draw/cost changes, and do not infer the cause from a mismatch alone. c=-1 is X-cost (normally all current Energy); c=-2 is the unplayable marker. Special card/free-play effects may alter spending or playability; p=false forbids play. Neither sentinel is a negative energy cost.");
     }
     if (enemies.some((enemy) => Number.isFinite(enemy.move?.damage) && enemy.move.damage >= 0)) {
       add("combat", "incoming-damage", "Enemy atk is the game's current displayed intent damage per hit, already adjusted for stance including Wrath; do not double it again. AxN means A damage on each of N hits, before your Block, not guaranteed HP loss. Refresh after changing stance; unusual Mod mechanics may alter actual damage.");

@@ -2,6 +2,23 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.23] - 2026-10-03
+
+### Clarified
+
+- First-action contract, detailed state reference and live-cost advisory now
+  explicitly identify `c: -1` as X-cost and `c: -2` as the unplayable marker.
+  Keep special card/free-play exceptions and live playability checks explicit;
+  neither sentinel is negative energy spending or proof of current playability.
+- Put `ed` shape in the mandatory contract: scalar for a sole enemy, sparse
+  1-based enemy-index object for multiple enemies. Missing entries fall back to
+  known `d`, never invented zero; explicit zero and unknown damage stay distinct.
+  Distinguish reconstructed-state absence from patch omission (retain) and
+  explicit `null` (clear the old field or map entry).
+- Add regression coverage for sparse/scalar/zero/unknown damage, roster
+  reindexing, and preservation of negative costs with live playability flags.
+- Damage estimation and action execution are unchanged.
+
 ## [0.2.22] - 2026-10-03
 
 ### Added

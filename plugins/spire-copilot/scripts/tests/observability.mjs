@@ -8,6 +8,52 @@ assert.ok(metadata.result.instructions.includes("current.stance"));
 const catalog = await runtime.handleMcpMessage({ jsonrpc: "2.0", id: 2, method: "tools/list" });
 assert.ok(catalog.result.tools.find((tool) => tool.name === "act_many").description.includes("before sending"));
 const { compactState, compactShopChoices, rememberAndCompact, currentStance } = runtime.modules.compaction;
+// Wire shapes are part of the first-action contract. ed is intentionally
+// sparse, zero is meaningful, and missing damage must not become numeric zero.
+const hit = { id: "Strike", name: "打击", cost: 1, damage: 6, has_target: true };
+const plain = { id: "A", current_hp: 20, powers: [] };
+const vulnerable = { id: "B", current_hp: 20, powers: [{ id: "Vulnerable", amount: 1 }] };
+const asHand = (monsters, overrides = {}) => compactState({ hand: [{ ...hit, ...overrides }], monsters }).hand[0];
+const sparse = JSON.parse(JSON.stringify(asHand([plain, vulnerable])));
+assert.equal(sparse.d, 6);
+assert.deepEqual(sparse.ed, { "2": 9 });
+assert.equal(Object.hasOwn(sparse.ed, "1"), false, "unmodified target uses d, not an invented zero");
+assert.equal(typeof sparse.ed, "object");
+assert.equal(asHand([vulnerable]).ed, 9, "sole enemy uses scalar ed");
+assert.equal(asHand([plain, { ...vulnerable, is_gone: true }]).ed, undefined);
+const reindexed = asHand([{ ...plain, is_gone: true }, vulnerable]);
+assert.equal(reindexed.ed, 9, "remaining sole target no longer uses the old index map");
+assert.deepEqual(asHand([{ ...plain, is_gone: true }, plain, vulnerable]).ed, { "2": 9 });
+const flying = { ...vulnerable, powers: [{ id: "Flight", amount: 1 }] };
+assert.equal(asHand([flying], { damage: 1 }).ed, 0);
+assert.deepEqual(asHand([plain, flying], { damage: 1 }).ed, { "2": 0 });
+const keyedHand = (monsters) => compactState({ hand: [{ ...hit, uuid: "ed-copy" }], monsters }).hand;
+const previousHand = keyedHand([plain, vulnerable]);
+const changedTargets = runtime.modules.compaction.handArrayDifference(previousHand, keyedHand([vulnerable, plain]));
+assert.deepEqual(changedTargets.changed[0].ed, { "1": 9, "2": null }, "map removal must explicitly clear the old target override");
+const cleared = runtime.modules.compaction.handArrayDifference(previousHand, keyedHand([plain, plain]));
+assert.equal(cleared.changed[0].ed, null, "clear absent estimate rather than silently keeping stale damage");
+const costOnly = runtime.modules.compaction.handArrayDifference(previousHand, [{ ...previousHand[0], c: 0 }]);
+assert.equal(Object.hasOwn(costOnly.changed[0], "ed"), false, "patch omission retains the previous estimate");
+assert.equal(asHand([plain], { damage: 0 }).d, 0);
+assert.equal(asHand([plain], { damage: 0 }).ed, undefined);
+for (const damage of [undefined, -1]) {
+  const unknown = asHand([plain, vulnerable], { damage });
+  assert.equal(Object.hasOwn(unknown, "d"), false);
+  assert.equal(Object.hasOwn(unknown, "ed"), false);
+}
+for (const cost of [-1, -2]) {
+  const blocked = asHand([plain], { cost, is_playable: false });
+  assert.equal(blocked.c, cost);
+  assert.equal(blocked.p, false);
+  assert.equal(runtime.modules.cards.playableHandCard({ ...hit, cost, is_playable: false }, { current_energy: 3 }), false);
+  // A special effect may permit the negative-cost instance. Preserve the live
+  // flag; do not add a blanket cost=-2 rejection or promise that X always plays.
+  const allowed = asHand([plain], { cost, is_playable: true });
+  assert.equal(allowed.c, cost);
+  assert.equal(allowed.p, undefined);
+  assert.equal(runtime.modules.cards.playableHandCard({ ...hit, cost, is_playable: true }, { current_energy: 0 }), true);
+}
 const card = (id, name, price, extra = {}) => ({ id, name, price, uuid: `uuid-${id}`, cost: 0, type: "ATTACK", ...extra });
 const shop = { in_game: true, floor: 4, screen_type: "SHOP_SCREEN", room_phase: "COMPLETE", gold: 100,
   choice_list: ["purge (75 gold)", "[迂回] Cost: 0 ATTACK (87 gold)",
@@ -163,4 +209,4 @@ assert.equal(relevant(createRuntime({ env: {} }).modules.safety.collectContextAd
   combat_detail: { turn: 1, player: { powers: [{ id: "Confusion" }] } } }))[0].id, "live-card-cost");
 assert.deepEqual(relevant(createRuntime({ env: {} }).modules.safety.collectContextAdvisories({ ...poisoned,
   room_phase: "COMPLETE" })), [], "no combat explanation outside combat");
-console.log("Observability tests passed: shop identity, potion slots, stance/intent semantics, and context-triggered one-shot Poison/live-cost advisories.");
+console.log("Observability tests passed: sparse/scalar/zero/unknown ed, negative costs/playability, shop identity, potion slots, stance/intent semantics, and context-triggered advisories.");
