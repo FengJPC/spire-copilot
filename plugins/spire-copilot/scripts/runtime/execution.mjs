@@ -154,6 +154,7 @@ export function createExecution({ config, session }, dependencies = {}) {
       const beforeTurn = state?.combat_detail?.turn;
 
       let toolCall;
+      let combatCompleted = false;
       const execution = { certainty: "not_sent" };
       const actionStart = state;
       try {
@@ -190,6 +191,27 @@ export function createExecution({ config, session }, dependencies = {}) {
             timeout: remainingTimeout, waitForVisual: visualWait,
           });
           state = settled.state;
+          combatCompleted = settled.terminal === "combat_completed";
+          if (combatCompleted && !settled.evidence) {
+            // The game reached a terminal combat state, but discarded the data
+            // needed to prove this exact action. Stop promptly without upgrading
+            // acceptance to verification, retrying, or executing later steps.
+            syncCombatSafety(state);
+            return rememberAndCompact(state, false, {
+              ...(single ? actionSummary(action) : { action: "act_many" }),
+              halted: true,
+              reason: "COMBAT_COMPLETED",
+              combat_completed: true,
+              settlement: "combat_completed",
+              execution_certainty: execution.certainty,
+              action_status: "outcome_unknown",
+              completed_actions: index,
+              ...(index ? { completed: normalizedActions.slice(0, index).map((item) => actionSummary(item)) } : {}),
+              unverified_action: actionSummary(action),
+              remaining_actions: normalizedActions.slice(index + 1).map(publicAction),
+              timeout_ms: timeout,
+            });
+          }
           execution.certainty = "verified";
           if (isPlayCardAction(action) && state.floor === actionStart.floor
               && state.combat_detail?.turn === beforeTurn) {
@@ -210,6 +232,17 @@ export function createExecution({ config, session }, dependencies = {}) {
       }
 
       const remaining = normalizedActions.slice(index + 1);
+      if (combatCompleted) {
+        return rememberAndCompact(state, false, {
+          ...(single ? actionSummary(action) : { action: "act_many", completed: index + 1 }),
+          settlement: "verified",
+          execution_certainty: "verified",
+          combat_completed: true,
+          ...(remaining.length ? { halted: true, reason: "COMBAT_COMPLETED",
+            completed_actions: index + 1, remaining_actions: remaining.map(publicAction) } : {}),
+          timeout_ms: timeout,
+        });
+      }
       const rosterChanged = monsterRosterKey(state) !== beforeRoster;
       const turnChanged = Number.isFinite(beforeTurn) && state?.combat_detail?.turn !== beforeTurn;
       if (remaining.length && rosterChanged && remaining.some(isTargetedAction)) {

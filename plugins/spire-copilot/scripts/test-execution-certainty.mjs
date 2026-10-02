@@ -8,8 +8,10 @@ import { fileURLToPath } from "node:url";
 
 const card = (uuid) => ({ id: "Guard", name: "Guard", uuid, cost: 0, block: 5, is_playable: true });
 let floor = 60, state, sent, faultAt, fault, mutate, holdTurn, noise, readFailures, initFailure, hangReads;
+let completeAt, completionScreen, completionHand, screenReads;
 function reset() {
   faultAt = 0; fault = "drop"; mutate = true; holdTurn = false; noise = false; readFailures = 0; hangReads = false;
+  completeAt = 0; completionScreen = "COMPLETE"; completionHand = "omit"; screenReads = 0;
   state = { in_game: true, ready_for_command: true, floor: floor++, room_phase: "COMBAT",
     room_type: "MonsterRoom", screen_type: "NONE", current_energy: 3, max_energy: 3,
     current_hp: 50, max_hp: 50, hand: [card("a"), card("b"), card("c")],
@@ -42,6 +44,7 @@ const server = http.createServer(async (req, res) => {
     if (message.method === "tools/call") {
       const { name, arguments: args = {} } = message.params;
       if (name === "get_screen_state") {
+        screenReads++;
         if (hangReads && sent.length) return;
         if (readFailures > 0) { readFailures--; res.destroy(); return; }
         value = result(state);
@@ -59,6 +62,7 @@ const server = http.createServer(async (req, res) => {
         const failing = sent.length === faultAt;
         if (failing && fault === "reject") value = result("Could not execute action", true);
         else {
+          const beforeHand = state.hand?.slice();
           if (mutate) {
             if (action.action === "play_card") {
               const index = state.hand.findIndex((c) => c.uuid === action.card_uuid);
@@ -77,6 +81,14 @@ const server = http.createServer(async (req, res) => {
               else state.screen_state.selected_cards.push(selected);
               state.can_proceed = true;
             } else { state.screen_type = "MAP"; state.room_phase = "COMPLETE"; }
+          }
+          if (sent.length === completeAt) {
+            state.room_phase = "COMPLETE"; state.screen_type = completionScreen; state.can_proceed = true;
+            if (completionScreen === "GAME_OVER") state.current_hp = 0;
+            delete state.combat_detail; delete state.monsters;
+            if (completionHand === "omit") delete state.hand;
+            else if (completionHand === "null") state.hand = null;
+            else if (completionHand === "retained") state.hand = beforeHand;
           }
           if (noise) { state.combat_detail.player.block++; state.can_proceed = true; }
           if (failing) {
@@ -169,6 +181,57 @@ try {
   await fresh(); mutate = false; noise = true;
   unknown(await act({ action: "use_potion", potion_slot: 1 }, { visual_wait: false }), 1, "timeout_unknown");
 
+  // Terminal combat frames omit the hand after a lethal. Completion stops the
+  // verifier promptly without claiming that the exact UUID play was verified.
+  for (const screen of ["COMPLETE", "COMBAT_REWARD", "GAME_OVER"]) {
+    for (const hand of ["omit", "null", "retained"]) {
+      await fresh(); completeAt = 1; completionScreen = screen; completionHand = hand;
+      const beforeReads = screenReads;
+      const receipt = await act(play);
+      assert.equal(receipt.result.reason, "COMBAT_COMPLETED");
+      assert.equal(receipt.result.combat_completed, true);
+      assert.equal(receipt.result.settlement, "combat_completed");
+      assert.equal(receipt.result.execution_certainty, "accepted");
+      assert.equal(receipt.result.action_status, "outcome_unknown");
+      assert.equal(receipt.result.completed_actions, 0);
+      assert.equal(receipt.result.unverified_action.card, "Guard");
+      assert.equal(receipt.result.error_kind, undefined);
+      assert.equal(receipt.changes.screen, screen);
+      assert.equal(sent.length, 1);
+      assert.equal(screenReads - beforeReads, 2, "only preflight and one terminal poll, not a timeout loop");
+    }
+  }
+  await fresh(); completeAt = 2;
+  const endedBatch = await batch([play, play, { action: "proceed" }, end]);
+  assert.equal(endedBatch.result.action_status, "outcome_unknown");
+  assert.equal(endedBatch.result.completed_actions, 1, "unverified terminal action is not counted as completed");
+  assert.equal(endedBatch.result.completed.length, 1);
+  assert.deepEqual(endedBatch.result.remaining_actions.map((item) => item.action), ["proceed", "end_turn"]);
+  assert.equal(sent.length, 2, "terminal batch never continues or retries");
+  await call("get_state"); assert.equal(sent.length, 2);
+
+  // When exact-card evidence survives, keep verification but halt even
+  // untargeted cards / navigation / end-turn steps at the combat boundary.
+  await fresh(); completeAt = 1; completionHand = "remaining";
+  const provedEnd = await batch([play, play, { action: "proceed" }, end]);
+  assert.equal(provedEnd.result.settlement, "verified");
+  assert.equal(provedEnd.result.execution_certainty, "verified");
+  assert.equal(provedEnd.result.reason, "COMBAT_COMPLETED");
+  assert.equal(provedEnd.result.completed_actions, 1);
+  assert.equal(provedEnd.result.remaining_actions.length, 3); assert.equal(sent.length, 1);
+  await fresh(); completeAt = 1;
+  const endedTurn = await batch([end, { action: "proceed" }]);
+  assert.equal(endedTurn.result.execution_certainty, "verified");
+  assert.equal(endedTurn.result.reason, "COMBAT_COMPLETED"); assert.equal(sent.length, 1);
+
+  // A lost mutation response remains transport-unknown even if combat ended;
+  // observing terminal state is never an excuse to replay or claim verification.
+  await fresh(); completeAt = 1; faultAt = 1;
+  const lostLethal = await batch([play, { action: "proceed" }]); unknown(lostLethal, 1);
+  assert.equal(lostLethal.result.execution_certainty, "sent_unknown");
+  assert.equal(lostLethal.changes.screen, "COMPLETE");
+  await call("get_state"); assert.equal(sent.length, 1);
+
   // Pending end-turn fences survive duplicate attempts, read errors/reconnects,
   // missing/backward turn metadata, and both public action paths.
   await fresh(); holdTurn = true; faultAt = 1;
@@ -232,7 +295,7 @@ try {
   assert.match((await act(play)).result.error, /authoritative/); assert.equal(sent.length, 1);
   state.combat_detail.cards_played_this_turn = 1; faultAt = 0;
   assert.equal((await act(play)).result.execution_certainty, "verified"); assert.equal(sent.length, 2);
-  console.log("Execution-certainty tests passed: not-sent vs lost/malformed/error responses, transport deadline, no retry/continuation, persistent end-turn fences, action-specific evidence, wait=false verification and uncertain/authoritative card counts.");
+  console.log("Execution-certainty tests passed: not-sent vs lost/malformed/error responses, transport deadline, no retry/continuation, terminal combat accounting, persistent end-turn fences, action-specific evidence, wait=false verification and uncertain/authoritative card counts.");
 } finally {
   for (const entry of pending.values()) clearTimeout(entry.timer);
   child.stdin.end(); child.kill(); lines.close();

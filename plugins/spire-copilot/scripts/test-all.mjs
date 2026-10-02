@@ -27,6 +27,7 @@ const path = (name) => fileURLToPath(new URL(name, scripts));
 await syntax(scripts);
 await node([path("server.mjs"), "--self-test"]);
 await node([path("tests/runtime-isolation.mjs")]);
+await node([path("tests/terminal-settlement.mjs")]);
 await node([path("test-hand-actions.mjs")]);
 await node([path("test-execution-certainty.mjs")]);
 await node([path("server.mjs"), "--benchmark"]);

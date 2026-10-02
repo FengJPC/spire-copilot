@@ -184,6 +184,19 @@ export function createSettlement({ config, session }, dependencies = {}) {
     return undefined;
   }
 
+  function combatCompletionEvidence(start, state) {
+    // A terminal room is a stopping condition, not proof that the exact action
+    // caused it. COMPLETE can omit hand/combat data entirely after a lethal.
+    // Do not accept missing fields, a reward-screen flash, another floor, or
+    // contradictory live opponents as completion of this combat.
+    if (start?.room_phase !== "COMBAT" || state?.room_phase !== "COMPLETE"
+        || !Number.isFinite(start.floor) || state.floor !== start.floor
+        || state.in_game === false) return undefined;
+    if ((state.monsters ?? []).some((monster) => !monster.is_gone
+        && (!Number.isFinite(monster.current_hp) || monster.current_hp > 0))) return undefined;
+    return "combat_completed";
+  }
+
   function makeSettlementTimeout(action, timeout, lastState) {
     const error = new Error(
       `Timed out after ${timeout}ms waiting for ${action.action} result verification. `
@@ -225,7 +238,8 @@ export function createSettlement({ config, session }, dependencies = {}) {
       }
 
       const evidence = actionSettlementEvidence(action, start, lastState);
-      if (!evidence) continue;
+      const terminal = combatCompletionEvidence(start, lastState);
+      if (!evidence && !terminal) continue;
 
       const minimumPacing = waitForVisual ? visualDelayForAction(action.action) : 0;
       const pacingRemaining = minimumPacing - (now() - started);
@@ -235,7 +249,7 @@ export function createSettlement({ config, session }, dependencies = {}) {
         }
         await pause(pacingRemaining);
       }
-      return { state: lastState, evidence, elapsedMs: now() - started };
+      return { state: lastState, evidence, ...(terminal ? { terminal } : {}), elapsedMs: now() - started };
     } while (true);
   }
 
@@ -249,6 +263,7 @@ export function createSettlement({ config, session }, dependencies = {}) {
     actionTransitionEvidence,
     actionObservableState,
     actionSettlementEvidence,
+    combatCompletionEvidence,
     makeSettlementTimeout,
     waitForActionSettlement,
   };

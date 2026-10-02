@@ -22,6 +22,7 @@ Read this reference only when compact fields are unclear, a state mismatch is re
 ## Settled actions
 
 - Action tools return a compact `result` plus `changes`. Only `settlement: "verified"` confirms the postcondition; a failed receipt may still show effects of an uncertain action.
+- `combat_completed: true` stops at an observed same-floor terminal combat state, not necessarily a victory. If exact action evidence vanished with the hand, `settlement: "combat_completed"` and `action_status: "outcome_unknown"` preserve acceptance without claiming verification. `completed_actions` excludes that unverified action; never replay `unverified_action` or resume `remaining_actions` blindly. If exact evidence survived, the action can still be `verified`, but later batch steps remain stopped.
 - `execution_certainty` distinguishes `not_sent`, `sent_unknown`, `accepted`, and `verified`. Only `not_sent` produces `not_executed`; after dispatch, response loss, malformed replies, or generic downstream errors produce `outcome_unknown`/`timeout_unknown`. The runtime never retries mutations and stops the remaining batch.
 - `visual_wait` controls visual pacing only. Legacy `wait` is its deprecated alias; even `wait: false` still waits for action-specific verification. One mutation-response/verification deadline includes HTTP waits and polling reads.
 - End-turn fences survive transport reconnects, duplicate attempts, and missing/backward turn metadata. A fresh later turn, changed floor, confirmed combat completion, or menu state resolves the fence. They are in-memory runtime safeguards, not a persistent cross-process transaction log.
@@ -34,4 +35,4 @@ Read this reference only when compact fields are unclear, a state mismatch is re
 - Never resend `end_turn` after a timeout or uncertain response. Read state; the original command may already have executed.
 - On card-selection screens, use the latest `choice_uuid` when names can repeat, otherwise a unique `choice_text`. Numeric indices can change after every selection. Shops always require `choice_text`.
 - Stable `choice_text` or `choice_uuid` actions may appear in `act_many`; the runtime resolves each against fresh state.
-- If a batch returns `halted: true`, trust its completed count and refreshed changes. Do not replay completed actions; inspect `failed_action_status` before handling the failed item.
+- If a batch returns `halted: true`, trust its completed count and observed changes. Do not replay completed or uncertain actions; inspect `failed_action_status` or `action_status` before handling an unverified item.

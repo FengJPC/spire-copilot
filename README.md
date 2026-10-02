@@ -95,6 +95,15 @@ action-specific result and its minimum animation pacing has elapsed. Pre-send
 errors, uncertain transport/downstream errors, and verification timeouts are
 reported separately. Only pre-send failures mean `not_executed`.
 
+A confirmed same-floor combat completion stops verification polling and all
+remaining batch steps. If the final hand was omitted, the receipt reports
+`combat_completed: true`, `settlement: "combat_completed"`, and
+`action_status: "outcome_unknown"`, retaining `execution_certainty: "accepted"`.
+This confirms the combat ended, not that the exact card caused it or that the
+run was won. The unverified action is excluded from `completed_actions` and is
+never retried. When exact action evidence remains, normal `verified` receipts
+are retained, while later batch steps still stop at the combat boundary.
+
 Development checks:
 
 ```powershell

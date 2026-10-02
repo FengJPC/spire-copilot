@@ -2,6 +2,26 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.20] - 2026-10-02
+
+### Fixed
+
+- Stop settlement polling promptly when the same combat reaches COMPLETE and
+  the game omits hand/combat fields after a final hit. Preserve an accepted but
+  unverified action as outcome-unknown instead of waiting for the full timeout
+  or inferring exact-card execution from an unrelated state change.
+- Halt every remaining batch step at the combat boundary, including untargeted
+  cards and navigation. Preserve normal verification when exact evidence is
+  available; never retry an uncertain mutation or equate completion with victory.
+
+### Added
+
+- Regression coverage for missing/null/retained terminal hands, verified terminal
+  actions, partial batches, reward/Boss/death screens, response loss, and false
+  completion cues during combat or on another floor.
+- Document the compact combat-completion receipt and its unverified-action
+  accounting in the README and the skill's conditional recovery reference.
+
 ## [0.2.19] - 2026-10-02
 
 ### Changed
