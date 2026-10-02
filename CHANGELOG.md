@@ -2,6 +2,37 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.18] - 2026-10-02
+
+### Fixed
+
+- Distinguish `not_sent`, `sent_unknown`, `accepted`, and `verified` execution
+  certainty. Only pre-dispatch failures mean `not_executed`; lost, malformed,
+  HTTP-error, or generic MCP-error replies remain outcome-unknown. Never retry
+  mutations or execute remaining batch actions after an uncertain result.
+- Retain pending end-turn fences across transport resets, duplicate requests,
+  and incomplete/backward metadata; resolve them only through fresh game state.
+  Set fences at dispatch, not before validation. Safeguards are in-memory and
+  do not claim durability across runtime process restarts.
+- Verify all public single/batch actions with specific card, potion-slot,
+  chosen-card/option, control-screen, and turn postconditions. Unrelated state
+  changes cannot prove card/potion success. Halt on room/screen boundaries too.
+- Bound mutation HTTP responses and verification reads under a shared deadline.
+  A stalled or aborted response is uncertain, not proof of non-execution.
+
+### Changed
+
+- Add `visual_wait` for animation pacing; retain `wait` as a deprecated alias.
+  Neither disables action verification or enables fire-and-forget execution.
+- Rename local Normality accounting to `trackedCardsPlayed`, increment only
+  verified plays, preserve uncertain counts over reconnects, and prefer an
+  upstream authoritative count when supplied. Current MCP The Spire supplies
+  no such counter; the runtime does not invent it.
+- Add protocol fault-injection tests for lost/error/malformed replies, hanging
+  writes/reads, partial batches, reconnects, duplicate fences, strict
+  postconditions, wait compatibility, and uncertain/authoritative card counts.
+  Keep module splitting separate from this safety release.
+
 ## [0.2.17] - 2026-10-02
 
 ### Added

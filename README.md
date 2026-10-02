@@ -21,6 +21,8 @@ Slay the Spire run. It adds a compact, safety-aware bridge in front of the
 - Screen-aware GRID compaction that keeps stable identities and live values
   without repeating every full card object.
 - Settled action responses that wait for animations and turn transitions.
+- Explicit execution certainty: response loss is never reported as non-execution,
+  uncertain actions stop batches, and pending end turns survive reconnections.
 - Animation-aware action pacing that prevents batches from advancing while a
   visible card, potion, or stance effect is still catching up.
 - Guards for Normality, duplicate end turns, changing enemy targets, shop item
@@ -82,19 +84,23 @@ Optional timing variables:
 - `STS_BATCH_TIMEOUT_MS` (default `20000`, applied once per batched action)
 
 `act` and `act_many` also accept a per-call `timeout_ms` override from
-1,000 to 120,000 milliseconds. This changes settlement waiting only; it never
-causes an uncertain action to be resent.
+1,000 to 120,000 milliseconds. Mutation responses and verification reads share
+one per-action deadline; it never causes an uncertain action to be resent.
+`visual_wait` only changes minimum visual pacing. Legacy `wait` is its
+deprecated alias: `wait: false` still verifies the action.
 
 For `act_many`, the timeout is one deadline per action. The runtime polls every
 180 ms by default and immediately continues once the action exposes an
-observable result and its minimum animation pacing has elapsed. Explicit MCP
-errors, verification errors, and verification timeouts are reported separately.
+action-specific result and its minimum animation pacing has elapsed. Pre-send
+errors, uncertain transport/downstream errors, and verification timeouts are
+reported separately. Only pre-send failures mean `not_executed`.
 
 Development checks:
 
 ```powershell
 node plugins/spire-copilot/scripts/server.mjs --self-test
 node plugins/spire-copilot/scripts/test-hand-actions.mjs
+node plugins/spire-copilot/scripts/test-execution-certainty.mjs
 node plugins/spire-copilot/scripts/server.mjs --benchmark
 ```
 

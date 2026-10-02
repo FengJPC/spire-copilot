@@ -154,7 +154,8 @@ try {
   const failed = await call("act_many", { actions: [
     { action: "play_card", card: failedView.hand[0].k }, { action: "end_turn" },
   ] });
-  assert.equal(failed.result.failed_action_status, "not_executed"); assert.equal(sent.length, 1);
+  assert.equal(failed.result.failed_action_status, "outcome_unknown"); assert.equal(sent.length, 1);
+  assert.equal(failed.result.execution_certainty, "sent_unknown");
   assert.equal(state.combat_detail.turn, 1);
 
   reset([body(1)]); await call("get_state"); noEffect = true;

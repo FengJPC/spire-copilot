@@ -14,7 +14,7 @@ Use the `spire_copilot` tools for live state and actions.
 3. Use `inspect_card` when an effect is missing, unfamiliar, modified, or worth verifying. Prefer an exact `choice_uuid`, otherwise `card_id` plus upgrades; do not request full state just to inspect one card.
    Use `inspect_pile` with `pile: draw`, `discard`, or `exhaust` only when composition matters for draw, recovery, or cycle planning. It is unordered, not a prediction of the next draw; pile stats may change on entering hand.
 4. Use `card_name` for the cheapest playable same-effect copy, or `card` with a hand `k` for an exact copy; Copilot handles instance matching and reindexing. Prefer `act`; use `act_many` only for short sequences with stable turns, targets, and choices.
-5. Trust settled action receipts and `changes`. Never replay completed actions or an uncertain `end_turn`; read state after ambiguity. Send known-lethal targeted attacks separately before targeting remaining enemies.
+5. Trust verified receipts and `changes`; `outcome_unknown`/`timeout_unknown` never mean not executed. Never replay completed or uncertain actions; read state instead. Send known-lethal targeted attacks separately before targeting remaining enemies. All actions verify settlement; `visual_wait` (legacy `wait`) controls pacing only.
 6. Resolve changing card choices by `choice_uuid` or unique `choice_text`; shops require `choice_text`. Never spend, buy, remove, or choose rewards from stale state.
 
 If the endpoint is unavailable, ask the user to start ModTheSpire with `MCP The Spire` enabled and enter the save; no separate relay is needed.

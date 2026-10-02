@@ -16,11 +16,22 @@ The plugin exposes five MCP tools:
   changes. If a later action fails, its normal result identifies completed,
   failed, and remaining actions together with the refreshed game state.
 
-Both action tools accept an optional `timeout_ms` settlement limit.
-`act_many` gives each action one shared 20-second verification deadline and
-polls until an observable result appears; single actions also retain the
-20-second default. Accepted actions that cannot be verified before the deadline
-return `timeout_unknown` and are never resent.
+Both action tools share the same action-specific verifier and optional
+`timeout_ms` limit (20 seconds by default). Mutation HTTP responses and
+verification reads share one deadline; a hanging response is aborted without
+resending the action. `visual_wait` controls minimum animation pacing only;
+legacy `wait` is a deprecated alias and never disables verification.
+
+Execution certainty is `not_sent`, `sent_unknown`, `accepted`, or `verified`.
+Only failures before action dispatch report `not_executed`; lost/malformed
+responses and generic downstream errors report `outcome_unknown` or
+`timeout_unknown` and stop the remaining batch. End-turn fences persist across
+transport reconnects and duplicate attempts until fresh state resolves them.
+These fences are in-memory, not durable across a runtime process restart.
+Unrelated state changes do not verify card or potion actions; immediate-return
+cards without richer upstream evidence may conservatively time out.
+Normality's local `trackedCardsPlayed` is not an authoritative game count;
+uncertain sends block limited plays unless a reliable count becomes available.
 
 For example, `inspect_pile({"pile":"draw"})` returns the current draw-pile
 composition with floor/turn context. It exposes no UUIDs or hand indices and

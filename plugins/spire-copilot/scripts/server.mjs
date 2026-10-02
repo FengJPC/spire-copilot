@@ -2,7 +2,7 @@
 
 import readline from "node:readline";
 
-const pluginVersion = "0.2.17";
+const pluginVersion = "0.2.18";
 const endpoint = process.env.STS_MCP_URL ?? "http://127.0.0.1:8080/mcp";
 const accept = "application/json, text/event-stream";
 const pollMs = Number(process.env.STS_POLL_MS ?? 180);
@@ -19,7 +19,7 @@ let observedHandState;
 let handHandles = { next: 1, byUuid: new Map(), byKey: new Map() };
 let previousRunContext;
 let gameInitialized = false;
-let combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
+let combatSafety = { floor: null, turn: null, trackedCardsPlayed: 0, countUncertain: false };
 let turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
 let advisoryKeys = new Set();
 let mapCache = { act: null, nodes: null, version: null, emittedVersion: null };
@@ -61,11 +61,12 @@ function resetMapCache() {
   mapCache = { act: null, nodes: null, version: null, emittedVersion: null };
 }
 
-function resetCardCatalog() {
+function resetCardCatalog({ preserveInstances = false, preserveRun = false } = {}) {
+  const activeRun = preserveRun && cardCatalog.activeRun;
   observedHandState = undefined;
-  handHandles = { next: 1, byUuid: new Map(), byKey: new Map() };
+  if (!preserveInstances) handHandles = { next: 1, byUuid: new Map(), byKey: new Map() };
   cardCatalog = {
-    activeRun: false,
+    activeRun,
     rawById: new Map(),
     attemptedIds: new Set(),
     definitions: new Map(),
@@ -149,18 +150,36 @@ function parseRpcBody(body) {
   return events.at(-1) ?? null;
 }
 
-async function post(payload) {
+async function post(payload, { execution, timeout = timeoutMs, onDispatch } = {}) {
   const headers = { Accept: accept, "Content-Type": "application/json" };
   if (sessionId) headers["Mcp-Session-Id"] = sessionId;
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-  });
-  const body = await response.text();
-  if (!response.ok) throw new Error(`HTTP ${response.status}: ${body}`);
-  sessionId ||= response.headers.get("mcp-session-id") ?? undefined;
-  return parseRpcBody(body);
+  const body = JSON.stringify(payload);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(1, timeout));
+  try {
+    onDispatch?.();
+    // Once fetch is invoked, a failure cannot prove that the game did not act.
+    if (execution) execution.certainty = "sent_unknown";
+    const response = await fetch(endpoint, { method: "POST", headers, body, signal: controller.signal });
+    const responseBody = await response.text();
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${responseBody}`);
+    sessionId ||= response.headers.get("mcp-session-id") ?? undefined;
+    const parsed = parseRpcBody(responseBody);
+    if (payload.id !== undefined && (!parsed || parsed.id !== payload.id
+        || (!Object.hasOwn(parsed, "result") && !Object.hasOwn(parsed, "error")))) {
+      throw new Error("MCP response missing or mismatched; delivery outcome is unknown");
+    }
+    return parsed;
+  } catch (error) {
+    if (controller.signal.aborted) {
+      const timedOut = new Error(`Timed out after ${timeout}ms waiting for the MCP response; no action was resent`);
+      timedOut.code = "ACTION_TRANSPORT_TIMEOUT";
+      throw timedOut;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function resetGameConnection() {
@@ -169,17 +188,17 @@ function resetGameConnection() {
   previousState = undefined;
   previousRunContext = undefined;
   gameInitialized = false;
-  combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
-  turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
+  // Transport resets do not resolve pending game actions or local counts.
   advisoryKeys = new Set();
   lastStableDecisionState = undefined;
   resetMapCache();
-  resetCardCatalog();
+  resetCardCatalog({ preserveInstances: true, preserveRun: true });
 }
 
-async function initializeGame() {
+async function initializeGame({ timeout = timeoutMs } = {}) {
   resetGameConnection();
-  await post({
+  const started = Date.now();
+  const initialized = await post({
     jsonrpc: "2.0",
     id: requestId++,
     method: "initialize",
@@ -188,13 +207,15 @@ async function initializeGame() {
       capabilities: {},
       clientInfo: { name: "spire-copilot-proxy", version: pluginVersion },
     },
-  });
-  await post({ jsonrpc: "2.0", method: "notifications/initialized" });
+  }, { timeout });
+  if (initialized?.error) throw new Error(`initialize: ${JSON.stringify(initialized.error)}`);
+  await post({ jsonrpc: "2.0", method: "notifications/initialized" },
+    { timeout: Math.max(1, timeout - (Date.now() - started)) });
   gameInitialized = true;
 }
 
-async function ensureGameConnection() {
-  if (!gameInitialized) await initializeGame();
+async function ensureGameConnection(options = {}) {
+  if (!gameInitialized) await initializeGame(options);
 }
 
 function contentText(result) {
@@ -204,18 +225,37 @@ function contentText(result) {
     .join("\n");
 }
 
-async function rawTool(name, args = {}) {
-  await ensureGameConnection();
+async function rawTool(name, args = {}, options = {}) {
+  const started = Date.now(), budget = options.timeout ?? timeoutMs;
+  await ensureGameConnection({ timeout: budget });
+  const remaining = budget - (Date.now() - started);
+  if (remaining <= 0) {
+    const error = new Error(`Timed out after ${budget}ms before ${name} dispatch`);
+    error.code = "ACTION_TRANSPORT_TIMEOUT";
+    throw error;
+  }
   const response = await post({
     jsonrpc: "2.0",
     id: requestId++,
     method: "tools/call",
     params: { name, arguments: args },
-  });
-  if (response?.error) throw new Error(`${name}: ${JSON.stringify(response.error)}`);
+  }, { ...options, timeout: remaining });
+  if (response?.error) {
+    const error = new Error(`${name}: ${JSON.stringify(response.error)}`);
+    error.code = "DOWNSTREAM_ACTION_ERROR";
+    throw error;
+  }
   const result = response?.result ?? {};
+  if (options.execution && !Array.isArray(result.content)) {
+    throw new Error("Malformed MCP action result; delivery outcome is unknown");
+  }
   const message = contentText(result) || JSON.stringify(result);
-  if (result.isError) throw new Error(`${name}: ${message}`);
+  if (result.isError) {
+    const error = new Error(`${name}: ${message}`);
+    error.code = "DOWNSTREAM_ACTION_ERROR";
+    throw error;
+  }
+  if (options.execution) options.execution.certainty = "accepted";
   return { result, message };
 }
 
@@ -300,26 +340,28 @@ function syncCardCatalogRun(state) {
   }
 }
 
-async function requestCardInfo(cardIds) {
+async function requestCardInfo(cardIds, { timeout = timeoutMs } = {}) {
   if (!cardIds.length) return [];
+  const started = Date.now();
   try {
-    const payload = parseState((await rawTool("get_card_info", { card_ids: cardIds })).message);
+    const payload = parseState((await rawTool("get_card_info", { card_ids: cardIds }, { timeout })).message);
     return Array.isArray(payload?.cards) ? payload.cards : [];
   } catch (error) {
-    if (isConnectionError(error)) throw error;
+    if (isConnectionError(error) || isTimeoutError(error)) throw error;
     if (cardIds.length === 1) return [];
     const cards = [];
-    for (const cardId of cardIds) cards.push(...await requestCardInfo([cardId]));
+    for (const cardId of cardIds) cards.push(...await requestCardInfo([cardId],
+      { timeout: Math.max(1, timeout - (Date.now() - started)) }));
     return cards;
   }
 }
 
-async function loadCardInfo(cardIds, { force = false } = {}) {
+async function loadCardInfo(cardIds, { force = false, timeout = timeoutMs } = {}) {
   const pending = [...new Set(cardIds.filter(Boolean))]
     .filter((cardId) => force || !cardCatalog.attemptedIds.has(cardId));
   if (!pending.length) return;
   for (const cardId of pending) cardCatalog.attemptedIds.add(cardId);
-  for (const card of await requestCardInfo(pending)) {
+  for (const card of await requestCardInfo(pending, { timeout })) {
     if (card?.id) cardCatalog.rawById.set(card.id, card);
   }
 }
@@ -333,12 +375,12 @@ function rememberCardDefinition(card) {
   return definition;
 }
 
-async function enrichCardDefinitions(state) {
+async function enrichCardDefinitions(state, { timeout = timeoutMs } = {}) {
   syncCardCatalogRun(state);
   if (!state?.in_game) return state;
   const instances = collectCardInstances(state);
   delete state._card_catalog_instances;
-  await loadCardInfo(instances.map(({ card }) => card.id));
+  await loadCardInfo(instances.map(({ card }) => card.id), { timeout });
   for (const { card } of instances) rememberCardDefinition(card);
   return state;
 }
@@ -372,8 +414,8 @@ function compactCardInstance(card, zone = undefined) {
   };
 }
 
-async function screenState() {
-  return parseState((await rawTool("get_screen_state")).message);
+async function screenState({ timeout = timeoutMs } = {}) {
+  return parseState((await rawTool("get_screen_state", {}, { timeout })).message);
 }
 
 function isTransientScreenReadError(error) {
@@ -385,7 +427,7 @@ async function waitUntilReady({ timeout = timeoutMs, readScreen = screenState, p
   let lastScreen = "unknown";
   do {
     try {
-      const state = await readScreen();
+      const state = await readScreen({ timeout: Math.max(1, timeout - (Date.now() - started)) });
       if (state?.ready_for_command) return state;
       lastScreen = state?.screen_type ?? "unknown";
     } catch (error) {
@@ -401,14 +443,14 @@ async function waitUntilReady({ timeout = timeoutMs, readScreen = screenState, p
   } while (true);
 }
 
-async function enrichRunAndCombat(state, { includePiles = false } = {}) {
+async function enrichRunAndCombat(state, { includePiles = false, timeout = timeoutMs } = {}) {
   if (!state.in_game) return state;
   if (state.floor === 0 && mapCache.act !== null) {
     resetMapCache();
   }
   const include = ["deck", "relics", "potions"];
   if (state.room_phase === "COMBAT") include.push("combat");
-  const detailed = parseState((await rawTool("get_game_state", { include })).message);
+  const detailed = parseState((await rawTool("get_game_state", { include }, { timeout })).message);
   const game = detailed?.game_state;
   if (!game) return state;
   const act = resolveAct(state, game);
@@ -443,6 +485,8 @@ async function enrichRunAndCombat(state, { includePiles = false } = {}) {
       exhaust_count: combat.exhaust_pile?.length ?? 0,
       limbo_count: combat.limbo?.length ?? 0,
       cards_discarded_this_turn: combat.cards_discarded_this_turn ?? 0,
+      ...(Number.isInteger(combat.cards_played_this_turn) && combat.cards_played_this_turn >= 0
+        ? { cards_played_this_turn: combat.cards_played_this_turn } : {}),
     },
   };
   enriched._card_catalog_instances = [
@@ -454,14 +498,14 @@ async function enrichRunAndCombat(state, { includePiles = false } = {}) {
   return enriched;
 }
 
-async function enrichMap(state) {
+async function enrichMap(state, { timeout = timeoutMs } = {}) {
   if (state.screen_type !== "MAP") return state;
   let act = state.run_detail?.act ?? resolveAct(state);
   syncMapCacheAct(act);
   if (mapCache.nodes && mapCache.act === act) {
     return { ...state, map: mapCache.nodes, map_version: mapCache.version };
   }
-  const detailed = parseState((await rawTool("get_game_state", { include: ["map"] })).message);
+  const detailed = parseState((await rawTool("get_game_state", { include: ["map"] }, { timeout })).message);
   const game = detailed?.game_state;
   const map = game?.map;
   if (!Array.isArray(map)) return state;
@@ -516,10 +560,11 @@ function carryForwardSameTurnIntents(state, previous = lastStableDecisionState) 
 
 async function decisionState({ timeout = timeoutMs, includePiles = false } = {}) {
   const started = Date.now();
+  const remaining = () => Math.max(1, timeout - (Date.now() - started));
   let state;
   do {
-    state = await waitUntilReady({ timeout: Math.max(1, timeout - (Date.now() - started)) });
-    state = await enrichRunAndCombat(state, { includePiles });
+    state = await waitUntilReady({ timeout: remaining() });
+    state = await enrichRunAndCombat(state, { includePiles, timeout: remaining() });
     state = carryForwardSameTurnIntents(state);
     if (isStableDecisionState(state)) break;
     if (Date.now() - started >= timeout) {
@@ -527,8 +572,8 @@ async function decisionState({ timeout = timeoutMs, includePiles = false } = {})
     }
     await sleep(pollMs);
   } while (true);
-  state = await enrichMap(state);
-  state = await enrichCardDefinitions(state);
+  state = await enrichMap(state, { timeout: remaining() });
+  state = await enrichCardDefinitions(state, { timeout: remaining() });
   syncEndTurnSafety(state);
   lastStableDecisionState = state;
   return state;
@@ -635,22 +680,27 @@ function collectContextAdvisories(state) {
 function syncCombatSafety(state) {
   const turn = state?.combat_detail?.turn;
   const floor = state?.floor;
-  if (state?.room_phase !== "COMBAT" || !Number.isFinite(turn)) {
-    combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
+  if (state?.in_game === false || state?.room_phase === "COMPLETE") {
+    combatSafety = { floor: null, turn: null, trackedCardsPlayed: 0, countUncertain: false };
     return;
   }
+  if (state?.room_phase !== "COMBAT" || !Number.isFinite(turn) || !Number.isFinite(floor)) return;
+  if (combatSafety.countUncertain && floor === combatSafety.floor && turn <= combatSafety.turn) return;
   if (combatSafety.floor !== floor || combatSafety.turn !== turn) {
-    combatSafety = { floor, turn, cardsPlayed: 0 };
+    combatSafety = { floor, turn, trackedCardsPlayed: 0, countUncertain: false };
   }
 }
 
 function syncEndTurnSafety(state) {
   const turn = state?.combat_detail?.turn;
   const floor = state?.floor;
-  if (state?.room_phase !== "COMBAT" || !Number.isFinite(turn)) {
+  if (state?.in_game === false || state?.room_phase === "COMPLETE") {
     turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
     return;
   }
+  if (state?.room_phase !== "COMBAT" || !Number.isFinite(turn) || !Number.isFinite(floor)) return;
+  if (turnTransitionSafety.endTurnSent && floor === turnTransitionSafety.floor
+      && turn <= turnTransitionSafety.turn) return;
   if (turnTransitionSafety.floor !== floor || turnTransitionSafety.turn !== turn) {
     turnTransitionSafety = { floor, turn, endTurnSent: false };
   }
@@ -664,14 +714,18 @@ function markEndTurnSent(state) {
       + `turn ${state.combat_detail.turn}. Poll state until the turn number changes; do not resend end_turn.`,
     );
   }
+  if (state?.room_phase !== "COMBAT" || !Number.isFinite(state.floor)
+      || !Number.isFinite(state.combat_detail?.turn)) {
+    throw new Error("SAFETY end_turn requires an observed stable combat turn");
+  }
   turnTransitionSafety.endTurnSent = true;
 }
 
 function endTurnHasSettled(start, state) {
-  if (state?.room_phase !== "COMBAT") return true;
-  if (state?.floor !== start.floor) return true;
+  if (state?.in_game === false || state?.room_phase === "COMPLETE") return true;
+  if (Number.isFinite(state?.floor) && state.floor !== start.floor) return true;
   const currentTurn = state?.combat_detail?.turn;
-  return Number.isFinite(currentTurn) && currentTurn !== start.turn;
+  return Number.isFinite(currentTurn) && currentTurn > start.turn;
 }
 
 async function waitForEndTurnSettlement(start, { timeout = timeoutMs } = {}) {
@@ -777,18 +831,58 @@ function actionObservableState(state) {
 }
 
 function actionSettlementEvidence(action, start, state) {
-  const transition = actionTransitionEvidence(start, state);
-  if (transition) return transition;
-
+  if (action.action === "end_turn") {
+    return endTurnHasSettled({ floor: start.floor, turn: start.combat_detail?.turn }, state)
+      ? "turn_or_combat_completed" : undefined;
+  }
   if (isPlayCardAction(action)) {
     const selected = cardForAction(start, action);
-    if (selected && !(state?.hand ?? []).some((card) => cardIdentityMatches(card, selected))) {
+    if (selected && Array.isArray(state?.hand)
+        && !state.hand.some((card) => cardIdentityMatches(card, selected))) {
       return "card_left_hand";
     }
+    // A screen/HP/block change cannot prove that this exact card was played.
+    // Immediate-return Mod cards may conservatively time out without a richer
+    // upstream execution receipt; never substitute unrelated state changes.
+    return undefined;
   }
-
-  if (JSON.stringify(actionObservableState(state)) !== JSON.stringify(actionObservableState(start))) {
-    return "state_changed";
+  if (["use_potion", "discard_potion"].includes(action.action)) {
+    const before = start.run_detail?.potions;
+    const after = state.run_detail?.potions;
+    const index = action.potion_slot - 1;
+    return Array.isArray(before) && Array.isArray(after) && before[index] && !before[index].is_empty
+      && (before[index].id !== after[index]?.id || after[index]?.is_empty === true)
+        ? "potion_slot_changed" : undefined;
+  }
+  const transition = actionTransitionEvidence(start, state);
+  const navigated = ["floor_changed", "room_phase_changed", "screen_changed"].includes(transition);
+  if (action.action === "choose") {
+    if (navigated) return transition;
+    const selected = choiceCards(start).find((card) => action.choice_uuid && card.uuid === action.choice_uuid)
+      ?? choiceCards(start)[action.choice_index - 1];
+    if (selected?.uuid) {
+      const selectedIn = (snapshot) => [
+        ...(snapshot.screen_state?.selected ?? []), ...(snapshot.screen_state?.selected_cards ?? []),
+      ].filter((card) => card.uuid === selected.uuid).length;
+      if (selectedIn(start) !== selectedIn(state)) return "selected_card_changed";
+      const hasChoices = state.screen_type === "HAND_SELECT"
+        ? Array.isArray(state.screen_state?.hand) || Array.isArray(state.hand)
+        : Array.isArray(state.screen_state?.cards);
+      if (hasChoices && !choiceCards(state).some((card) => card.uuid === selected.uuid)) return "choice_card_removed";
+    }
+    const text = start.choice_list?.[action.choice_index - 1];
+    if (text !== undefined && Array.isArray(state.choice_list)
+        && state.choice_list.filter((item) => item === text).length
+          < start.choice_list.filter((item) => item === text).length) return "chosen_option_removed";
+    if (start.screen_type === "EVENT"
+        && start.screen_state?.body_text !== state.screen_state?.body_text) return "event_advanced";
+    return undefined;
+  }
+  if (["confirm", "proceed", "skip", "cancel"].includes(action.action)) {
+    if (navigated) return transition;
+    const screen = (snapshot) => ({ choices: snapshot.choice_list,
+      canProceed: snapshot.can_proceed, detail: snapshot.screen_state });
+    if (JSON.stringify(screen(start)) !== JSON.stringify(screen(state))) return "control_screen_changed";
   }
   return undefined;
 }
@@ -805,6 +899,7 @@ function makeSettlementTimeout(action, timeout, lastState) {
 
 function isTimeoutError(error) {
   return error?.code === "ACTION_SETTLEMENT_TIMEOUT"
+    || error?.code === "ACTION_TRANSPORT_TIMEOUT"
     || /^Timed out after \d+ms/i.test(String(error?.message ?? error));
 }
 
@@ -888,10 +983,16 @@ function normalitySafetyCheck(state, actions) {
   syncCombatSafety(state);
   if (!hasNormality(state)) return;
   const requested = actions.filter(isPlayCardAction).length;
-  const remaining = Math.max(0, 3 - combatSafety.cardsPlayed);
+  const authoritative = state.combat_detail?.cards_played_this_turn;
+  const hasAuthoritative = Number.isInteger(authoritative) && authoritative >= 0;
+  if (!hasAuthoritative && combatSafety.countUncertain) {
+    throw new Error("SAFETY Normality: a sent card has an unknown outcome; tracked count is uncertain until the next turn");
+  }
+  const played = hasAuthoritative ? authoritative : combatSafety.trackedCardsPlayed;
+  const remaining = Math.max(0, 3 - played);
   if (requested > remaining) {
     throw new Error(
-      `SAFETY Normality: turn ${combatSafety.turn} already has ${combatSafety.cardsPlayed} tracked card(s); `
+      `SAFETY Normality: turn ${combatSafety.turn} already has ${played} ${hasAuthoritative ? "authoritative" : "tracked"} card(s); `
       + `batch requests ${requested}, but only ${remaining} more may be played. `
       + "Play/exhaust Normality separately, refresh state, then continue.",
     );
@@ -1538,18 +1639,20 @@ function publicAction(action) {
   return value;
 }
 
-function failedBatchReceipt(actions, index, error, downstreamAccepted, stateRefreshError = undefined) {
+function failedBatchReceipt(actions, index, error, certainty, stateRefreshError = undefined) {
   const message = error instanceof Error ? error.message : String(error);
-  const errorKind = !downstreamAccepted
+  const errorKind = certainty === "not_sent"
     ? "action_error"
     : isTimeoutError(error)
-      ? "verification_timeout"
-      : "verification_error";
-  const failedStatus = !downstreamAccepted
+      ? (certainty === "sent_unknown" ? "transport_timeout" : "verification_timeout")
+      : certainty === "sent_unknown"
+        ? (error?.code === "DOWNSTREAM_ACTION_ERROR" ? "downstream_error" : "transport_error")
+        : "verification_error";
+  const failedStatus = certainty === "not_sent"
     ? "not_executed"
-    : errorKind === "verification_timeout"
+    : isTimeoutError(error)
       ? "timeout_unknown"
-      : "outcome_uncertain";
+      : "outcome_unknown";
   return {
     action: "act_many",
     halted: true,
@@ -1558,6 +1661,7 @@ function failedBatchReceipt(actions, index, error, downstreamAccepted, stateRefr
     ...(index ? { completed: actions.slice(0, index).map((action) => actionSummary(action)) } : {}),
     failed_action: actionSummary(actions[index]),
     failed_action_status: failedStatus,
+    execution_certainty: certainty,
     error_kind: errorKind,
     error: message,
     remaining_actions: actions.slice(index + 1).map(publicAction),
@@ -1573,11 +1677,12 @@ async function settleFailedBatchAction({
   actions,
   index,
   error,
-  downstreamAccepted,
+  certainty,
   timeout = batchTimeoutMs,
 }) {
   let currentState = error?.lastState ?? state;
   let stateRefreshError;
+  if (isConnectionError(error)) resetGameConnection();
   if (!isTimeoutError(error)) {
     try {
       await sleep(settleMs);
@@ -1592,7 +1697,7 @@ async function settleFailedBatchAction({
   return rememberAndCompact(
     currentState,
     false,
-    failedBatchReceipt(actions, index, error, downstreamAccepted, stateRefreshError),
+    failedBatchReceipt(actions, index, error, certainty, stateRefreshError),
   );
 }
 
@@ -1652,8 +1757,14 @@ async function validateToolCall(name, args) {
   }
 }
 
-async function safeExecuteActions(actions, wait = true, timeout = batchTimeoutMs, single = false) {
-  let state = await decisionState({ timeout });
+async function safeExecuteActions(actions, visualWait = true, timeout = batchTimeoutMs, single = false) {
+  let state;
+  try {
+    state = await decisionState({ timeout });
+  } catch (error) {
+    if (isConnectionError(error)) resetGameConnection();
+    return { result: failedBatchReceipt(actions, 0, error, "not_sent", error) };
+  }
   syncCombatSafety(state);
 
   const isCombatBatch = state.room_phase === "COMBAT" && actions.length > 0;
@@ -1667,7 +1778,7 @@ async function safeExecuteActions(actions, wait = true, timeout = batchTimeoutMs
     normalizedActions = actions.map((action) => normalizeStableCardReference(action, observedHandState ?? state));
     if (isCombatBatch) preflightCombatActions(state, normalizedActions);
   } catch (error) {
-    return settleFailedBatchAction({ state, actions, index: 0, error, downstreamAccepted: false, timeout });
+    return settleFailedBatchAction({ state, actions, index: 0, error, certainty: "not_sent", timeout });
   }
 
   for (let index = 0; index < normalizedActions.length; index += 1) {
@@ -1675,13 +1786,14 @@ async function safeExecuteActions(actions, wait = true, timeout = batchTimeoutMs
     const beforeRoster = monsterRosterKey(state);
     const beforeTurn = state?.combat_detail?.turn;
 
-    let settledByDedicatedWait = false;
     let toolCall;
-    let downstreamAccepted = false;
+    const execution = { certainty: "not_sent" };
+    const actionStart = state;
     try {
       if (action.action === "wait") {
         await sleep(Math.min(500, Math.max(0, Number(action.ms ?? 100))));
-        downstreamAccepted = true;
+        execution.certainty = "verified";
+        state = await decisionState({ timeout });
       } else {
         if (isPlayCardAction(action)) {
           const resolved = resolvePlayCardAction(state, action);
@@ -1693,60 +1805,39 @@ async function safeExecuteActions(actions, wait = true, timeout = batchTimeoutMs
         if (toolCall) {
           if (toolCall.name === "choose") {
             toolCall = { ...toolCall, args: normalizeChooseArgs(state, toolCall.args) };
+            const selected = choiceCards(state)[toolCall.args.choice_index - 1];
+            action = { ...action, choice_index: toolCall.args.choice_index,
+              ...(selected?.uuid ? { choice_uuid: selected.uuid } : {}) };
+            normalizedActions[index] = action;
           }
-          if (toolCall.name === "end_turn") markEndTurnSent(state);
           await validateToolCall(toolCall.name, toolCall.args);
-          await rawTool(toolCall.name, toolCall.args);
-          downstreamAccepted = true;
-          if (isPlayCardAction(action)) combatSafety.cardsPlayed += 1;
-          if (toolCall.name === "end_turn" && wait) {
-            const started = Date.now();
-            state = await waitForEndTurnSettlement(
-              { floor: state.floor, turn: beforeTurn },
-              { timeout },
-            );
-            const pacingRemaining = visualDelayForAction(toolCall.name) - (Date.now() - started);
-            if (pacingRemaining > 0) {
-              await sleep(Math.min(pacingRemaining, Math.max(0, timeout - (Date.now() - started))));
-            }
-            settledByDedicatedWait = true;
-          } else if (toolCall.name === "choose" && state.screen_type === "HAND_SELECT") {
-            const started = Date.now();
-            state = await waitForHandSelectionChoiceSettlement(state, { timeout });
-            const pacingRemaining = visualDelayForAction(toolCall.name) - (Date.now() - started);
-            if (wait && pacingRemaining > 0) {
-              await sleep(Math.min(pacingRemaining, Math.max(0, timeout - (Date.now() - started))));
-            }
-            settledByDedicatedWait = true;
-          }
         } else {
-          await rawTool("execute_actions", { actions: [action] });
-          downstreamAccepted = true;
+          throw new Error(`Unsupported action '${action.action}'`);
         }
-      }
-
-      if (!settledByDedicatedWait) {
-        if (action.action === "wait") {
-          state = await decisionState({ timeout });
-        } else {
-          const settled = await waitForActionSettlement(action, state, {
-            timeout,
-            waitForVisual: wait,
-          });
-          state = settled.state;
+        const started = Date.now();
+        await rawTool(toolCall.name, toolCall.args, { execution, timeout,
+          ...(action.action === "end_turn" ? { onDispatch: () => markEndTurnSent(actionStart) } : {}) });
+        const remainingTimeout = timeout - (Date.now() - started);
+        if (remainingTimeout <= 0) throw makeSettlementTimeout(action, timeout, state);
+        const settled = await waitForActionSettlement(action, actionStart, {
+          timeout: remainingTimeout, waitForVisual: visualWait,
+        });
+        state = settled.state;
+        execution.certainty = "verified";
+        if (isPlayCardAction(action) && state.floor === actionStart.floor
+            && state.combat_detail?.turn === beforeTurn) {
+          combatSafety.trackedCardsPlayed += 1;
         }
       }
       syncCombatSafety(state);
     } catch (error) {
-      if (toolCall?.name === "end_turn" && !downstreamAccepted) {
-        turnTransitionSafety.endTurnSent = false;
-      }
+      if (isPlayCardAction(action) && execution.certainty !== "not_sent") combatSafety.countUncertain = true;
       return settleFailedBatchAction({
         state,
         actions: normalizedActions,
         index,
         error,
-        downstreamAccepted,
+        certainty: execution.certainty,
         timeout,
       });
     }
@@ -1772,68 +1863,34 @@ async function safeExecuteActions(actions, wait = true, timeout = batchTimeoutMs
         state: rememberAndCompact(state, false, { action: "act_many", completed: index + 1 }),
       };
     }
+    if (remaining.length && (state.floor !== actionStart.floor
+        || state.room_phase !== actionStart.room_phase || state.screen_type !== actionStart.screen_type)) {
+      return { halted: true, reason: "SAFETY room or screen changed; inspect the new decision before continuing",
+        completed_actions: index + 1, remaining_actions: remaining.map(publicAction),
+        state: rememberAndCompact(state, false, { action: "act_many", completed: index + 1 }) };
+    }
   }
 
   return rememberAndCompact(state, false, {
     ...(single ? actionSummary(normalizedActions[0])
       : { action: "act_many", completed: normalizedActions.length }),
     settlement: "verified",
+    execution_certainty: "verified",
     timeout_ms: timeout,
   });
 }
 
-async function callAndSettle(name, args = {}, wait = true, timeout = timeoutMs) {
-  if (name === "execute_actions") return safeExecuteActions(args.actions ?? [], wait, timeout);
-  if (name === "play_card") return safeExecuteActions([{ action: "play_card", ...args }], wait, timeout, true);
-  let callArgs = { ...args };
-  const summaryArgs = { ...args };
-  let callState;
-  if (name === "choose") {
-    callState = await decisionState({ timeout });
-    callArgs = normalizeChooseArgs(callState, callArgs);
+async function callAndSettle(name, args = {}, visualWait = true, timeout = timeoutMs) {
+  if (name === "execute_actions") return safeExecuteActions(args.actions ?? [], visualWait, timeout);
+  if (actionToolCall({ action: name })) {
+    return safeExecuteActions([{ action: name, ...args }], visualWait, timeout, true);
   }
-  if (name === "end_turn") {
-    callState ??= await decisionState({ timeout });
-    markEndTurnSent(callState);
-  }
-  await validateToolCall(name, callArgs);
-  if (name === "play_card") {
-    const state = await decisionState({ timeout });
-    normalitySafetyCheck(state, [{ action: "play_card", ...callArgs }]);
-  }
-  let called;
-  try {
-    called = await rawTool(name, callArgs);
-  } catch (error) {
-    if (name === "end_turn") turnTransitionSafety.endTurnSent = false;
-    throw error;
-  }
-  if (name === "play_card") combatSafety.cardsPlayed += 1;
-  if (!wait || name === "get_screen_state" || name === "get_game_state") {
-    if (name === "get_screen_state") return rememberAndCompact(parseState(called.message));
-    if (name === "get_game_state") return parseState(called.message);
-    return { ok: true, result: called.message };
-  }
-  if (name === "end_turn") {
-    let state = await waitForEndTurnSettlement({
-      floor: callState.floor,
-      turn: callState.combat_detail.turn,
-    }, { timeout });
-    state = await waitForVisualSettlement(name, state, { readState: () => decisionState({ timeout }) });
-    syncCombatSafety(state);
-    return rememberAndCompact(state, false, actionSummary({ action: name, ...summaryArgs }));
-  }
-  if (name === "choose" && callState?.screen_type === "HAND_SELECT") {
-    let state = await waitForHandSelectionChoiceSettlement(callState, { timeout });
-    state = await waitForVisualSettlement(name, state, { readState: () => decisionState({ timeout }) });
-    syncCombatSafety(state);
-    return rememberAndCompact(state, false, actionSummary({ action: name, ...summaryArgs }));
-  }
-  await sleep(settleMs);
-  let state = await decisionState({ timeout });
-  state = await waitForVisualSettlement(name, state, { readState: () => decisionState({ timeout }) });
-  syncCombatSafety(state);
-  return rememberAndCompact(state, false, actionSummary({ action: name, ...summaryArgs }));
+  // Retain legacy diagnostic reads; all public mutations use the same verifier.
+  await validateToolCall(name, args);
+  const called = await rawTool(name, args);
+  if (name === "get_screen_state") return rememberAndCompact(parseState(called.message));
+  if (name === "get_game_state") return parseState(called.message);
+  return { ok: true, result: called.message };
 }
 
 async function runSafetySelfTests() {
@@ -2029,6 +2086,21 @@ async function runSafetySelfTests() {
   ) !== "card_left_hand") {
     throw new Error("Self-test failed: an exact duplicate card instance leaving hand was not detected");
   }
+  const unrelated = { ...actionStart, current_energy: 2,
+    combat_detail: { ...actionStart.combat_detail, player: { block: 99 } } };
+  if (actionSettlementEvidence({ action: "play_card", card_name: "小刀" }, actionStart, unrelated)
+      || actionSettlementEvidence({ action: "end_turn" }, actionStart, unrelated)
+      || actionSettlementEvidence({ action: "play_card", card_name: "小刀" }, actionStart,
+        { ...unrelated, screen_type: "GRID", hand: undefined })) {
+    throw new Error("Self-test failed: unrelated state or missing hand verified a strong-postcondition action");
+  }
+  const potionStart = { ...actionStart, run_detail: { potions: [{ id: "P", can_use: true }, { id: "Q" }] } };
+  if (actionSettlementEvidence({ action: "use_potion", potion_slot: 1 }, potionStart,
+      { ...potionStart, run_detail: { potions: [{ id: "P", can_use: false }, { id: "Other" }] } })
+      || actionSettlementEvidence({ action: "discard_potion", potion_slot: 1 }, potionStart,
+        { ...potionStart, run_detail: { potions: undefined } })) {
+    throw new Error("Self-test failed: unrelated slot/playability change verified a potion action");
+  }
 
   let virtualNow = 0;
   let actionReads = 0;
@@ -2067,13 +2139,13 @@ async function runSafetySelfTests() {
     throw new Error("Self-test failed: action verification timeout was not classified at its shared deadline");
   }
 
-  combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
+  combatSafety = { floor: null, turn: null, trackedCardsPlayed: 0, countUncertain: false };
   expectThrow("Normality rejects a fourth queued card", () => normalitySafetyCheck(baseState, [
     { action: "play_card" }, { action: "play_card" }, { action: "play_card" }, { action: "play_card" },
   ]));
 
   syncCombatSafety(baseState);
-  combatSafety.cardsPlayed = 2;
+  combatSafety.trackedCardsPlayed = 2;
   expectThrow("Normality accounts for cards already played", () => normalitySafetyCheck(baseState, [
     { action: "play_card" }, { action: "play_card" },
   ]));
@@ -2153,6 +2225,16 @@ async function runSafetySelfTests() {
   turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
   markEndTurnSent(endTurnState);
   expectThrow("Duplicate end_turn is rejected on the same turn", () => markEndTurnSent(endTurnState));
+  combatSafety = { floor: 9, turn: 4, trackedCardsPlayed: 2, countUncertain: true };
+  resetGameConnection();
+  if (!turnTransitionSafety.endTurnSent || !combatSafety.countUncertain
+      || combatSafety.trackedCardsPlayed !== 2) throw new Error("Self-test failed: reconnect erased pending safety state");
+  syncEndTurnSafety({ floor: 9, room_phase: "COMBAT" });
+  syncEndTurnSafety({ ...endTurnState, combat_detail: { turn: 3 } });
+  syncCombatSafety({ floor: 9, room_phase: "COMBAT" });
+  syncCombatSafety({ ...endTurnState, combat_detail: { turn: 3 } });
+  expectThrow("Incomplete or backward metadata cannot release an end-turn fence", () => markEndTurnSent(endTurnState));
+  if (!combatSafety.countUncertain) throw new Error("Self-test failed: incomplete metadata cleared uncertain counts");
   syncEndTurnSafety({ ...endTurnState, combat_detail: { turn: 5 } });
   markEndTurnSent({ ...endTurnState, combat_detail: { turn: 5 } });
   const endTurnStart = { floor: endTurnState.floor, turn: endTurnState.combat_detail.turn };
@@ -2165,6 +2247,8 @@ async function runSafetySelfTests() {
   if (!endTurnHasSettled(endTurnStart, { floor: 9, room_phase: "COMPLETE" })) {
     throw new Error("Self-test failed: combat completion was not treated as settled");
   }
+  if (endTurnHasSettled(endTurnStart, {}) || endTurnHasSettled(endTurnStart,
+    { ...endTurnState, combat_detail: { turn: 3 } })) throw new Error("Self-test failed: missing/backward metadata settled end_turn");
 
   const liveCombatRewardFrame = {
     ready_for_command: true,
@@ -2493,7 +2577,7 @@ async function runSafetySelfTests() {
     ],
     1,
     new Error("play_card: Card not found in hand: 化体为空+"),
-    false,
+    "not_sent",
   );
   if (partialBatchFailure.completed_actions !== 1
       || partialBatchFailure.completed?.[0]?.card !== "旋身+"
@@ -2507,7 +2591,7 @@ async function runSafetySelfTests() {
     [{ action: "end_turn" }],
     0,
     makeSettlementTimeout({ action: "end_turn" }, 20000, endTurnState),
-    true,
+    "accepted",
   ).failed_action_status !== "timeout_unknown") {
     throw new Error("Self-test failed: an accepted action with expired verification was not reported as timeout_unknown");
   }
@@ -2640,7 +2724,7 @@ async function runSafetySelfTests() {
     throw new Error("Self-test failed: Coffee Dripper Rest advisory was not emitted");
   }
 
-  combatSafety = { floor: null, turn: null, cardsPlayed: 0 };
+  combatSafety = { floor: null, turn: null, trackedCardsPlayed: 0, countUncertain: false };
   turnTransitionSafety = { floor: null, turn: null, endTurnSent: false };
   advisoryKeys = new Set();
   process.stdout.write("Self-tests passed: safety guards, per-action deadlines, contextual advisories, stable combat state, transient reward, event and hand-selection reads, 1-based choices, act-aware map graph, semantic delta, on-demand unordered piles, and run changes\n");
@@ -2841,7 +2925,8 @@ const PLUGIN_TOOLS = [
       type: "object",
       properties: {
         ...ACTION_PROPERTIES,
-        wait: { type: "boolean", default: true },
+        visual_wait: { type: "boolean", description: "Minimum visual pacing (default true); settlement is always verified." },
+        wait: { type: "boolean", description: "Deprecated alias of visual_wait; false never disables verification." },
         timeout_ms: TIMEOUT_PROPERTY,
       },
       required: ["action"],
@@ -2865,7 +2950,8 @@ const PLUGIN_TOOLS = [
             additionalProperties: false,
           },
         },
-        wait: { type: "boolean", default: true },
+        visual_wait: { type: "boolean", description: "Minimum visual pacing (default true); settlement is always verified." },
+        wait: { type: "boolean", description: "Deprecated alias of visual_wait; false never disables verification." },
         timeout_ms: TIMEOUT_PROPERTY,
       },
       required: ["actions"],
@@ -3072,16 +3158,16 @@ async function dispatchPluginTool(name, args = {}) {
   if (name === "inspect_pile") return inspectPile(args);
   if (name === "inspect_card") return inspectCard(args);
   if (name === "act") {
-    const { action, wait = true, timeout_ms = timeoutMs, ...actionArgs } = args;
+    const { action, wait, visual_wait = wait ?? true, timeout_ms = timeoutMs, ...actionArgs } = args;
     const call = actionToolCall({ action, ...actionArgs });
     if (!call) throw new Error(`Unsupported action '${action}'`);
-    return callAndSettle(call.name, call.args, wait, timeout_ms);
+    return callAndSettle(call.name, call.args, visual_wait, timeout_ms);
   }
   if (name === "act_many") {
     return callAndSettle(
       "execute_actions",
       { actions: args.actions ?? [] },
-      args.wait !== false,
+      args.visual_wait ?? args.wait ?? true,
       args.timeout_ms ?? batchTimeoutMs,
     );
   }
