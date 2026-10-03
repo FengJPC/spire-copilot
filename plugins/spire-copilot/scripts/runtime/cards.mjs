@@ -1,6 +1,10 @@
 // cards responsibilities; dependencies are injected by runtime/index.mjs.
 export function createCards({ config, session }, dependencies = {}) {
   const { timeoutMs } = config;
+  // Card-info replies are immutable catalog records, distinct from live hand
+  // stats. Weak keys expire with replaced/reset replies; new source objects
+  // and upgrade variants are compiled independently.
+  const definitionCache = new WeakMap();
   const {
     isConnectionError,
     isPlayCardAction,
@@ -126,7 +130,14 @@ export function createCards({ config, session }, dependencies = {}) {
     const ref = cardRef(card);
     const raw = session.cardCatalog.rawById.get(card?.id);
     if (!ref || !raw) return undefined;
-    const definition = compactCardDefinition(raw, cardUpgradeCount(card));
+    const upgrades = cardUpgradeCount(card);
+    let variants = definitionCache.get(raw);
+    if (!variants) {
+      variants = new Map();
+      definitionCache.set(raw, variants);
+    }
+    if (!variants.has(upgrades)) variants.set(upgrades, compactCardDefinition(raw, upgrades));
+    const definition = variants.get(upgrades);
     if (definition) session.cardCatalog.definitions.set(ref, definition);
     return definition;
   }

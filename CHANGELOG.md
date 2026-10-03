@@ -2,6 +2,45 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.31] - 2026-10-03
+
+### Fixed
+
+- Claims on a completed reward screen verify the selected reward's canonical
+  identity/count removal, including the last relic, potion or gold reward when
+  MCP The Spire omits the now-unavailable `choice_list`. The verifier requires
+  aligned starting choices/details and explicit same-floor post-action rewards;
+  missing data, unrelated changes and removal of another reward do not suffice.
+- Regression coverage reproduces the last Strike Dummy claim through public
+  `act` and `act_many`, proves first-read settlement with one dispatch, and covers
+  duplicate identities, mixed rewards and unknown-outcome batch stopping.
+
+### Changed
+
+- Event compact responses omit duplicate `details.options` only when their
+  enabled text and indices exactly match `choices`; body text, disabled options,
+  mismatches and missing identity information remain available.
+- Immutable card-info definitions are compiled once per source record/upgrade
+  variant, avoiding repeated normalization on state polling. New records and
+  resets remain independent; live hand costs and playability are never cached.
+- Entity-array deltas fall back to full replacement when keys repeat, preserving
+  duplicate Mod items rather than silently overwriting them in an ID map.
+
+## [0.2.30] - 2026-10-03
+
+### Fixed
+
+- Single-card GRID choices such as upgrade, purge and transform selections now
+  settle as soon as the same screen exposes its enabled confirmation stage.
+  The verifier requires the exact frozen choice UUID, one required card, a
+  false-to-true confirmation transition and `can_proceed`; it does not accept an
+  unrelated screen change or loosen multi-select verification.
+- Regression coverage reproduces the observed upgrade shape with the card list
+  hidden at confirmation, proves first-poll settlement with normal visual pacing,
+  and rejects wrong identities, multi/any-number grids, stale confirmation,
+  disabled confirmation and other screens. A public MCP action test also proves
+  one dispatch and one confirming post-action read. Unknown outcomes remain no-retry.
+
 ## [0.2.29] - 2026-10-03
 
 ### Added

@@ -21,9 +21,9 @@ catch (error) {
   checks.push({ name: "syntax discovery", run: () => { throw error; } });
 }
 checks.push({ name: "safety self-tests", args: [path("server.mjs"), "--self-test"] });
-for (const name of ["tests/check-runner.mjs", "tests/runtime-isolation.mjs",
+for (const name of ["tests/check-runner.mjs", "tests/grid-choice-settlement.mjs", "tests/reward-choice-settlement.mjs", "tests/runtime-isolation.mjs",
   "tests/terminal-settlement.mjs", "tests/observability.mjs", "tests/orb-observability.mjs",
-  "tests/shop-batches.mjs", "tests/interface-advisories.mjs", "test-hand-actions.mjs",
+  "tests/shop-batches.mjs", "tests/interface-advisories.mjs", "tests/compaction-efficiency.mjs", "test-hand-actions.mjs",
   "test-shop-observability.mjs", "test-execution-certainty.mjs"]) {
   checks.push({ name, args: [path(name)] });
 }

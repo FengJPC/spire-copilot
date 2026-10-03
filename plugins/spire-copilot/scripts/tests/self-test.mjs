@@ -6,7 +6,7 @@ export async function runSafetySelfTests(runtime) {
   const { carryForwardSameTurnIntents, isStableDecisionState, mapMatchesVisibleNodes, mapVersion, resolveAct, waitUntilReady } = runtime.modules.state;
   const { compactCardDefinition, normalizeStableCardReference, pendingCardDefinitionPayload, resetCardCatalog, resolvePlayCardAction } = runtime.modules.cards;
   const { collectContextAdvisories, endTurnHasSettled, lethalRetargetSafetyCheck, markEndTurnSent, normalitySafetyCheck, normalizeChooseArgs, normalizeShopChooseArgs, syncCombatSafety, syncEndTurnSafety } = runtime.modules.safety;
-  const { actionSettlementEvidence, handSelectionChoiceHasSettled, makeSettlementTimeout, selectedHandCount, waitForActionSettlement, waitForHandSelectionChoiceSettlement, waitForVisualSettlement } = runtime.modules.settlement;
+  const { actionSettlementEvidence, handSelectionChoiceHasSettled, makeSettlementTimeout, selectedHandCount, singleCardGridChoiceHasSettled, waitForActionSettlement, waitForHandSelectionChoiceSettlement, waitForVisualSettlement } = runtime.modules.settlement;
   const { compactRunDelta, compactState, diffValue, handArrayDifference } = runtime.modules.compaction;
   const { failedBatchReceipt, publicAction } = runtime.modules.execution;
   const { compactPileCards, validateCardInspectionArgs, validatePileInspectionArgs } = runtime.modules.inspection;
@@ -219,8 +219,58 @@ export async function runSafetySelfTests(runtime) {
     throw new Error("Self-test failed: unrelated slot/playability change verified a potion action");
   }
 
+  const gridCard = { id: "Zap", name: "电击", uuid: "zap-upgrade", cost: 1 };
+  const gridChoice = { action: "choose", choice_index: 1, choice_uuid: gridCard.uuid };
+  const gridStart = {
+    floor: 2,
+    room_phase: "COMPLETE",
+    screen_type: "GRID",
+    choice_list: [gridCard.name],
+    can_proceed: false,
+    screen_state: { cards: [gridCard], num_cards: 1, any_number: false,
+      confirm_up: false, for_upgrade: true },
+  };
+  const gridConfirm = {
+    ...gridStart,
+    choice_list: undefined,
+    can_proceed: true,
+    proceed_button: "confirm",
+    screen_state: { ...gridStart.screen_state, cards: undefined, confirm_up: true },
+  };
+  if (!singleCardGridChoiceHasSettled(gridChoice, gridStart, gridConfirm)
+      || actionSettlementEvidence(gridChoice, gridStart, gridConfirm)
+        !== "grid_single_card_confirm_ready") {
+    throw new Error("Self-test failed: single-card GRID confirmation was not accepted as exact choice evidence");
+  }
+  for (const [action, start, after] of [
+    [{ ...gridChoice, choice_uuid: "other" }, gridStart, gridConfirm],
+    [gridChoice, { ...gridStart, screen_state: { ...gridStart.screen_state, num_cards: 2 } }, gridConfirm],
+    [gridChoice, { ...gridStart, screen_state: { ...gridStart.screen_state, any_number: true } }, gridConfirm],
+    [gridChoice, { ...gridStart, can_proceed: true,
+      screen_state: { ...gridStart.screen_state, confirm_up: true } }, gridConfirm],
+    [gridChoice, gridStart, { ...gridConfirm, can_proceed: false }],
+    [gridChoice, gridStart, { ...gridConfirm, screen_type: "EVENT" }],
+  ]) {
+    if (singleCardGridChoiceHasSettled(action, start, after)) {
+      throw new Error("Self-test failed: ambiguous GRID transition verified a card choice");
+    }
+  }
+
   let virtualNow = 0;
   let actionReads = 0;
+  const verifiedGridChoice = await waitForActionSettlement(gridChoice, gridStart, {
+    timeout: 20000,
+    now: () => virtualNow,
+    pause: async (delay) => { virtualNow += delay; },
+    readState: async () => { actionReads += 1; return gridConfirm; },
+  });
+  if (actionReads !== 1 || verifiedGridChoice.evidence !== "grid_single_card_confirm_ready"
+      || virtualNow !== Math.min(300, visualSettleMs)) {
+    throw new Error("Self-test failed: confirmed GRID choice did not settle after the first observed confirmation");
+  }
+
+  virtualNow = 0;
+  actionReads = 0;
   const verifiedAction = await waitForActionSettlement(
     { action: "play_card", card_name: "小刀", target_index: 1 },
     actionStart,

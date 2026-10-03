@@ -254,15 +254,20 @@ export function createCompaction({ config, session }, dependencies = {}) {
       };
     }
     if (state.screen_type === "EVENT" && Array.isArray(details.options)) {
+      const options = details.options.map((option) => ({
+        ...(Number.isInteger(option.choice_index) ? { i: option.choice_index } : {}),
+        ...(option.disabled ? { disabled: true } : {}),
+        text: option.text,
+      }));
+      const choicesCoverOptions = Array.isArray(state.choice_list)
+        && options.length > 0 && state.choice_list.length === options.length
+        && options.every((option, index) => !option.disabled && option.i === index + 1
+          && typeof option.text === "string" && option.text === state.choice_list[index]);
       return {
         event_id: details.event_id,
         event_name: details.event_name,
         body_text: details.body_text,
-        options: details.options.map((option) => ({
-          ...(Number.isInteger(option.choice_index) ? { i: option.choice_index } : {}),
-          ...(option.disabled ? { disabled: true } : {}),
-          text: option.text,
-        })),
+        ...(!choicesCoverOptions ? { options } : {}),
       };
     }
     return details;
@@ -452,6 +457,9 @@ export function createCompaction({ config, session }, dependencies = {}) {
     const keyFor = (item) => item?.i ?? item?.slot ?? item?.id;
     const beforeMap = new Map(before.map((item) => [keyFor(item), item]));
     const afterMap = new Map(after.map((item) => [keyFor(item), item]));
+    // A repeated key is not a stable instance identity. Preserve the complete
+    // array instead of overwriting a copy and emitting a misleading partial diff.
+    if (beforeMap.size !== before.length || afterMap.size !== after.length) return undefined;
     if ([...beforeMap.keys(), ...afterMap.keys()].some((key) => key === undefined)) return undefined;
     const changed = [];
     for (const [key, item] of afterMap) {

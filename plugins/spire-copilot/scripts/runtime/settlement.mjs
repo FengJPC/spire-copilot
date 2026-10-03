@@ -59,6 +59,53 @@ export function createSettlement({ config, session }, dependencies = {}) {
     return state.can_proceed === true && selectedHandCount(state) > selectedHandCount(start);
   }
 
+  function singleCardGridChoiceHasSettled(action, start, state) {
+    if (action?.action !== "choose" || start?.screen_type !== "GRID"
+        || state?.screen_type !== "GRID") return false;
+    const before = start.screen_state;
+    const after = state.screen_state;
+    if (before?.num_cards !== 1 || before?.any_number === true
+        || before?.confirm_up === true || after?.confirm_up !== true
+        || state.can_proceed !== true) return false;
+    // The executor freezes the selected UUID before dispatch. Require that
+    // exact identity to have been a real starting choice; an arbitrary confirm
+    // transition must not verify a stale or malformed action.
+    return typeof action.choice_uuid === "string"
+      && choiceCards(start).some((card) => card.uuid === action.choice_uuid);
+  }
+
+  function rewardIdentity(reward) {
+    const type = reward?.reward_type;
+    if (type === "RELIC" && reward.relic?.id) return JSON.stringify([type, reward.relic.id]);
+    if (type === "POTION" && reward.potion?.id) return JSON.stringify([type, reward.potion.id]);
+    if (["GOLD", "STOLEN_GOLD"].includes(type) && Number.isFinite(reward.gold)) {
+      return JSON.stringify([type, reward.gold]);
+    }
+    if (type === "SAPPHIRE_KEY" && reward.link?.id) return JSON.stringify([type, reward.link.id]);
+    return undefined;
+  }
+
+  function rewardChoiceHasSettled(action, start, state) {
+    if (action?.action !== "choose" || start?.screen_type !== "COMBAT_REWARD"
+        || state?.screen_type !== "COMBAT_REWARD" || start.room_phase !== "COMPLETE"
+        || state.room_phase !== "COMPLETE" || !Number.isFinite(start.floor)
+        || state.floor !== start.floor || state.in_game === false) return false;
+    const before = start.screen_state?.rewards;
+    const after = state.screen_state?.rewards;
+    // Vanilla builds both lists from the same reward collection. Require an
+    // aligned starting snapshot, and an explicit post-action rewards array:
+    // absent choice_list is normal after the last claim, absent details is not
+    // evidence. Count identities so removal of another reward cannot settle it.
+    if (!Array.isArray(before) || !Array.isArray(after)
+        || !Array.isArray(start.choice_list) || before.length !== start.choice_list.length
+        || !Number.isInteger(action.choice_index) || action.choice_index < 1
+        || action.choice_index > before.length) return false;
+    const identity = rewardIdentity(before[action.choice_index - 1]);
+    if (!identity) return false;
+    const count = (rewards) => rewards.filter((reward) => rewardIdentity(reward) === identity).length;
+    return count(after) < count(before);
+  }
+
   async function waitForHandSelectionChoiceSettlement(
     start,
     { timeout = timeoutMs, readState, pause = sleep } = {},
@@ -181,7 +228,11 @@ export function createSettlement({ config, session }, dependencies = {}) {
         // Purge can open a selection screen; unresolved text-only Mod choices
         // retain generic option/transition evidence, without inventing a UUID.
       }
+      if (rewardChoiceHasSettled(action, start, state)) return "chosen_reward_removed";
       if (navigated) return transition;
+      if (singleCardGridChoiceHasSettled(action, start, state)) {
+        return "grid_single_card_confirm_ready";
+      }
       const selected = choiceCardForAction(start, action);
       if (selected?.uuid) {
         const selectedIn = (snapshot) => [
@@ -285,6 +336,7 @@ export function createSettlement({ config, session }, dependencies = {}) {
     waitForEndTurnSettlement,
     selectedHandCount,
     handSelectionChoiceHasSettled,
+    singleCardGridChoiceHasSettled,
     waitForHandSelectionChoiceSettlement,
     actionTransitionEvidence,
     actionObservableState,

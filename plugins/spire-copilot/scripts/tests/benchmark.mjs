@@ -76,6 +76,19 @@ export function runSyntheticBenchmark(runtime) {
   const stanceAfter = stanceBefore.map((card) => card.d ? { ...card, d: card.d * 2 } : card);
   const legacyStanceDelta = { hand: multisetDifference(stanceBefore, stanceAfter) };
   const compactStanceDelta = { hand: handArrayDifference(stanceBefore, stanceAfter) };
+  const eventTexts = [
+    "[Give a potion] Lose Smoke Bomb. Obtain a relic.",
+    "[Give gold] Lose 77 gold. Obtain a relic.",
+    "[Give a card] Lose Ball Lightning. Obtain a relic.",
+    "[Attack]",
+  ];
+  const eventInput = { ready_for_command: true, screen_type: "EVENT", choice_list: eventTexts,
+    screen_state: { event_id: "WeMeetAgain", event_name: "We Meet Again",
+      body_text: "A familiar man offers to trade one item for a relic.",
+      options: eventTexts.map((text, choice_index) => ({ text, choice_index })) } };
+  const eventCompact = compactState(eventInput);
+  const eventLegacy = { ...eventCompact, details: { ...eventCompact.details,
+    options: eventTexts.map((text, index) => ({ i: index + 1, text })) } };
   process.stdout.write(`${JSON.stringify({
     fixture: "single-combat-decision",
     repeated_state_bytes_per_followup: bytes(after),
@@ -91,6 +104,9 @@ export function runSyntheticBenchmark(runtime) {
     stance_hand_compact_delta_bytes: bytes(compactStanceDelta),
     stance_hand_reduction_percent: Number(((1 - bytes(compactStanceDelta) / bytes(legacyStanceDelta)) * 100).toFixed(1)),
     current_stance_echo_bytes: bytes({ current: { stance: "Wrath" } }),
+    event_legacy_bytes: bytes(eventLegacy),
+    event_compact_bytes: bytes(eventCompact),
+    event_reduction_percent: Number(((1 - bytes(eventCompact) / bytes(eventLegacy)) * 100).toFixed(1)),
     two_potion_slots_snapshot_bytes: bytes({ potions: [
       { id: "EnergyPotion", name: "能量药水", can_use: true },
       { id: "Potion Slot", name: "药水栏位", is_empty: true },
