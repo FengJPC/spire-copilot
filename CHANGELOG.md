@@ -2,6 +2,18 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.28] - 2026-10-03
+
+### Fixed
+
+- Incoming-damage advisory and references explicitly identify enemy Weak,
+  player Vulnerable and stance as already included in displayed per-hit atk.
+  Do not apply these twice; intent remains before Block, not guaranteed HP loss.
+  Refresh after power/stance changes and account separately for later mitigation,
+  other damage sources and Mod mechanics. No execution or damage formula changed.
+- Regression coverage preserves upstream multi-hit intent with Weak/Vulnerable/
+  Wrath and checks the existing once-per-encounter delivery and reconnect reset.
+
 ## [0.2.27] - 2026-10-03
 
 ### Fixed

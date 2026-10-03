@@ -87,7 +87,7 @@ export function createSafety({ config, session }, dependencies = {}) {
       add("combat", "live-card-cost", "Hand c is the live current-turn cost; card_defs c is the printed/upgraded baseline. Differences can be legitimate cost modification, not automatically bad Mod data. Budget live costs and playability, refresh after draw/cost changes, and do not infer the cause from a mismatch alone. c=-1 is X-cost (normally all current Energy); c=-2 is the unplayable marker. Special card/free-play effects may alter spending or playability; p=false forbids play. Neither sentinel is a negative energy cost.");
     }
     if (enemies.some((enemy) => Number.isFinite(enemy.move?.damage) && enemy.move.damage >= 0)) {
-      add("combat", "incoming-damage", "Enemy atk is the game's current displayed intent damage per hit, already adjusted for stance including Wrath; do not double it again. AxN means A damage on each of N hits, before your Block, not guaranteed HP loss. Refresh after changing stance; unusual Mod mechanics may alter actual damage.");
+      add("combat", "incoming-damage", "Enemy atk is current displayed intent damage per hit, including enemy Weak, player Vulnerable and stance (Wrath); do not apply these twice. AxN means N hits of A before Block, not guaranteed HP loss. Refresh after power/stance changes; separately account for later damage mitigation, other damage sources and Mod mechanics.");
     }
     const thorns = enemies.flatMap((enemy) => (enemy.powers ?? [])
       .filter((power) => entityMatches(power, ["Thorns", "Sharp Hide", "尖刺", "锋利外壳"]))

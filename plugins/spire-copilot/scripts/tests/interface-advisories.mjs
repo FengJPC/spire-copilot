@@ -64,6 +64,31 @@ assert.deepEqual(ids(read({ ...shop, screen_state: { cards: [targeted] },
   run_detail: { potions: [] } })).sort(), ["card-targeting", "potion-slots", "shop-choice"]);
 assert.equal(ids(createRuntime({ env: {} }).modules.compaction.rememberAndCompact(choices))[0], "card-targeting");
 
+// Intent damage is already adjusted upstream; preserve 9x2 instead of applying
+// Weak/Vulnerable/Wrath again. The explanation is encounter-scoped, not per read.
+const incomingRuntime = createRuntime({ env: {} });
+const incomingState = { ...combat, combat_detail: { turn: 1,
+  player: { stance: "Wrath", powers: [{ id: "Vulnerable", amount: 2 }] } },
+  monsters: [{ id: "Enemy", current_hp: 20, intent: "ATTACK",
+    powers: [{ id: "Weak", amount: 2 }], move: { damage: 9, hits: 2 } }] };
+const incomingRead = (state) => incomingRuntime.modules.compaction.rememberAndCompact(state);
+const firstIncoming = incomingRead(incomingState);
+assert.equal(firstIncoming.enemies[0].atk, "9x2");
+const incomingHint = firstIncoming.advisories.find((hint) => hint.id === "incoming-damage");
+assert.ok(incomingHint.text.includes("enemy Weak") && incomingHint.text.includes("player Vulnerable"));
+assert.ok(incomingHint.text.includes("not guaranteed HP loss"));
+assert.equal(ids(incomingRead(incomingState)).includes("incoming-damage"), false);
+assert.equal(ids(incomingRead({ ...incomingState, combat_detail: {
+  ...incomingState.combat_detail, turn: 2 } })).includes("incoming-damage"), false);
+assert.equal(ids(incomingRead({ ...incomingState, floor: 2 })).includes("incoming-damage"), true);
+incomingRuntime.modules.transport.resetGameConnection();
+assert.equal(ids(incomingRead(incomingState)).includes("incoming-damage"), true);
+const absentRuntime = createRuntime({ env: {} });
+assert.equal(ids(absentRuntime.modules.compaction.rememberAndCompact(combat))
+  .includes("incoming-damage"), false);
+assert.equal(ids(absentRuntime.modules.compaction.rememberAndCompact(incomingState))
+  .includes("incoming-damage"), true, "incomplete intent must not consume the hint");
+
 // Interface deduplication must not quiet the existing per-turn danger warnings.
 const dangerous = { ...combat, hand: [{ id: "Normality", name: "凡庸" }, targeted],
   combat_detail: { turn: 1, player: { stance: "Wrath" } },
