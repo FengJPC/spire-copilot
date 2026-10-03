@@ -10,6 +10,7 @@ export function createState({ config, session }, dependencies = {}) {
     sleep,
     syncEndTurnSafety,
   } = dependencies;
+  const now = dependencies.now ?? Date.now;
 
   function resetMapCache() {
     session.mapCache = { act: null, nodes: null, version: null, emittedVersion: null };
@@ -87,11 +88,15 @@ export function createState({ config, session }, dependencies = {}) {
   }
 
   async function waitUntilReady({ timeout = timeoutMs, readScreen = screenState, pause = sleep } = {}) {
-    const started = Date.now();
+    const started = now();
     let lastScreen = "unknown";
     do {
+      const remaining = timeout - (now() - started);
+      if (remaining <= 0) {
+        throw new Error(`Timed out after ${timeout}ms; last screen=${lastScreen}`);
+      }
       try {
-        const state = await readScreen({ timeout: Math.max(1, timeout - (Date.now() - started)) });
+        const state = await readScreen({ timeout: remaining });
         if (state?.ready_for_command) return state;
         lastScreen = state?.screen_type ?? "unknown";
       } catch (error) {
@@ -100,10 +105,10 @@ export function createState({ config, session }, dependencies = {}) {
         if (!isTransientScreenReadError(error)) throw error;
         lastScreen = `unavailable (${error.message})`;
       }
-      if (Date.now() - started >= timeout) {
+      if (now() - started >= timeout) {
         throw new Error(`Timed out after ${timeout}ms; last screen=${lastScreen}`);
       }
-      await pause(pollMs);
+      await pause(Math.min(pollMs, timeout - (now() - started)));
     } while (true);
   }
 
@@ -183,6 +188,21 @@ export function createState({ config, session }, dependencies = {}) {
     return { ...state, map, map_version: version };
   }
 
+  function hasOpeningTurnActivity(state) {
+    const combat = state.combat_detail;
+    if ([combat?.cards_played_this_turn, combat?.cards_discarded_this_turn,
+      combat?.discard_count, combat?.exhaust_count].some((count) => Number.isFinite(count) && count > 0)) {
+      return true;
+    }
+    // Powers may leave no discard/exhaust evidence. A previously observed hand
+    // proves the opening draw finished, but only in this exact floor/turn.
+    const previous = session.lastStableDecisionState;
+    return Number.isFinite(state.floor) && previous?.floor === state.floor
+      && previous.room_phase === "COMBAT"
+      && previous.combat_detail?.turn === 1 && combat?.turn === 1
+      && Array.isArray(previous.hand) && previous.hand.length > 0;
+  }
+
   function isStableDecisionState(state) {
     // MCP The Spire can briefly expose an empty combat reward frame while a
     // combat card-selection grid is opening or updating.  The enriched combat
@@ -197,7 +217,8 @@ export function createState({ config, session }, dependencies = {}) {
     const openingFrameLooksIncomplete = state.combat_detail.turn === 1
       && state.current_energy === 0
       && !state.hand?.length
-      && state.combat_detail.draw_count > 0;
+      && state.combat_detail.draw_count > 0
+      && !hasOpeningTurnActivity(state);
     return !openingFrameLooksIncomplete;
   }
 
@@ -223,24 +244,43 @@ export function createState({ config, session }, dependencies = {}) {
   }
 
   async function decisionState({ timeout = timeoutMs, includePiles = false } = {}) {
-    const started = Date.now();
-    const remaining = () => Math.max(1, timeout - (Date.now() - started));
+    const started = now();
     let state;
-    do {
-      state = await waitUntilReady({ timeout: remaining() });
-      state = await enrichRunAndCombat(state, { includePiles, timeout: remaining() });
-      state = carryForwardSameTurnIntents(state);
-      if (isStableDecisionState(state)) break;
-      if (Date.now() - started >= timeout) {
-        throw new Error(`Timed out after ${timeout}ms waiting for a stable game state`);
+    let stage = "screen readiness";
+    function deadlineError(cause) {
+      const error = new Error(`Timed out after ${timeout}ms reading a stable game state `
+        + `(stage=${stage}, screen=${state?.screen_type ?? "unknown"}, turn=${state?.combat_detail?.turn ?? "unknown"})`,
+      cause ? { cause } : undefined);
+      error.code = "STATE_READ_TIMEOUT";
+      return error;
+    }
+    function remaining(nextStage) {
+      stage = nextStage;
+      const budget = timeout - (now() - started);
+      if (budget <= 0) throw deadlineError();
+      return budget;
+    }
+    try {
+      do {
+        state = await waitUntilReady({ timeout: remaining("screen readiness") });
+        state = await enrichRunAndCombat(state, { includePiles, timeout: remaining("combat/run details") });
+        state = carryForwardSameTurnIntents(state);
+        if (isStableDecisionState(state)) break;
+        await sleep(Math.min(pollMs, remaining("decision stability")));
+      } while (true);
+      state = await enrichMap(state, { timeout: remaining("map details") });
+      state = await enrichCardDefinitions(state, { timeout: remaining("card definitions") });
+      remaining("finalization");
+      syncEndTurnSafety(state);
+      session.lastStableDecisionState = state;
+      return state;
+    } catch (error) {
+      if (error.code !== "STATE_READ_TIMEOUT" && now() - started >= timeout
+          && (error.code === "ACTION_TRANSPORT_TIMEOUT" || /^Timed out/i.test(error.message))) {
+        throw deadlineError(error);
       }
-      await sleep(pollMs);
-    } while (true);
-    state = await enrichMap(state, { timeout: remaining() });
-    state = await enrichCardDefinitions(state, { timeout: remaining() });
-    syncEndTurnSafety(state);
-    session.lastStableDecisionState = state;
-    return state;
+      throw error;
+    }
   }
 
   return {

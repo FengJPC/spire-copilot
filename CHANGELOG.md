@@ -2,6 +2,23 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.32] - 2026-10-03
+
+### Fixed
+
+- A spent first-turn hand with zero energy is no longer mistaken for an
+  unfinished opening draw. Positive authoritative play/discard counts, discard
+  or exhaust pile activity, or a previously observed hand on the same floor and
+  turn prove the draw finished. Genuine opening frames and unknown intents still
+  wait; an independent reconnect can recover the observed five-slime case.
+- State polling and enrichment share a strict deadline. Expired budgets no
+  longer dispatch additional 1ms reads; timeout diagnostics report the original
+  read budget and stage instead of a misleading final transport timeout.
+- Regression coverage verifies an exact-UUID final Strike through public `act`
+  on the first confirming read, incomplete openings, all-power hands, floor/turn
+  boundaries, and no read dispatch after the deadline. Unknown actions remain
+  no-replay and action-specific verification is unchanged.
+
 ## [0.2.31] - 2026-10-03
 
 ### Fixed
