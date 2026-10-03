@@ -1,7 +1,7 @@
 // Preserve the public environment variables and defaults.
 export function createConfig(env = process.env, overrides = {}) {
   return {
-    pluginVersion: "0.2.28",
+    pluginVersion: "0.2.29",
     endpoint: env.STS_MCP_URL ?? "http://127.0.0.1:8080/mcp",
     accept: "application/json, text/event-stream",
     pollMs: Number(env.STS_POLL_MS ?? 180),

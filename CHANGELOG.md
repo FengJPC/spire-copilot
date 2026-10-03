@@ -2,6 +2,24 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.29] - 2026-10-03
+
+### Added
+
+- The once-per-connection orb hint and reference explain that vanilla channeling
+  with all available slots occupied evokes slot 1 before inserting the new orb;
+  count that evoke rather than only the new orb's passive effect. Zero capacity,
+  unavailable data and Mod rules must not be treated as a full occupied queue.
+
+### Changed
+
+- Development checks continue through independent scripts after a failure and
+  print every result, returning nonzero if any check failed. Stateful scripts
+  retain first-assertion failure; spawn errors and timeouts are not green results.
+- Runner regression tests exercise real nonzero exits, missing executables,
+  syntax errors, timeout closure, later-check execution and parent-visible status.
+  Gameplay settlement, safety guards and mutation retry policy are unchanged.
+
 ## [0.2.28] - 2026-10-03
 
 ### Fixed

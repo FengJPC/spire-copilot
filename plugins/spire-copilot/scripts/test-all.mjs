@@ -1,39 +1,33 @@
 #!/usr/bin/env node
 import { readdir } from "node:fs/promises";
-import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { runChecks } from "./testing/check-runner.mjs";
 
 const scripts = new URL("./", import.meta.url);
-async function node(args) {
-  await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, args, { stdio: "inherit", windowsHide: true });
-    const deadline = setTimeout(() => { child.kill(); reject(new Error(`Test timeout: ${args.join(" ")}`)); }, 90000);
-    child.on("error", (error) => { clearTimeout(deadline); reject(error); });
-    child.on("exit", (code, signal) => {
-      clearTimeout(deadline);
-      if (code === 0) resolve();
-      else reject(new Error(`Test failed (${code ?? signal}): ${args.join(" ")}`));
-    });
-  });
-}
+const checks = [];
 async function syntax(folder) {
   for (const entry of await readdir(folder, { withFileTypes: true })) {
     const url = new URL(entry.name + (entry.isDirectory() ? "/" : ""), folder);
     if (entry.isDirectory()) await syntax(url);
-    else if (entry.name.endsWith(".mjs")) await node(["--check", fileURLToPath(url)]);
+    else if (entry.name.endsWith(".mjs")) checks.push({
+      name: `syntax ${fileURLToPath(url).slice(fileURLToPath(scripts).length)}`,
+      args: ["--check", fileURLToPath(url)],
+    });
   }
 }
 const path = (name) => fileURLToPath(new URL(name, scripts));
-await syntax(scripts);
-await node([path("server.mjs"), "--self-test"]);
-await node([path("tests/runtime-isolation.mjs")]);
-await node([path("tests/terminal-settlement.mjs")]);
-await node([path("tests/observability.mjs")]);
-await node([path("tests/orb-observability.mjs")]);
-await node([path("tests/shop-batches.mjs")]);
-await node([path("tests/interface-advisories.mjs")]);
-await node([path("test-hand-actions.mjs")]);
-await node([path("test-shop-observability.mjs")]);
-await node([path("test-execution-certainty.mjs")]);
-await node([path("server.mjs"), "--benchmark"]);
-console.log("All syntax, safety, isolation, integration, execution-certainty and benchmark checks passed.");
+try { await syntax(scripts); }
+catch (error) {
+  checks.push({ name: "syntax discovery", run: () => { throw error; } });
+}
+checks.push({ name: "safety self-tests", args: [path("server.mjs"), "--self-test"] });
+for (const name of ["tests/check-runner.mjs", "tests/runtime-isolation.mjs",
+  "tests/terminal-settlement.mjs", "tests/observability.mjs", "tests/orb-observability.mjs",
+  "tests/shop-batches.mjs", "tests/interface-advisories.mjs", "test-hand-actions.mjs",
+  "test-shop-observability.mjs", "test-execution-certainty.mjs"]) {
+  checks.push({ name, args: [path(name)] });
+}
+checks.push({ name: "synthetic benchmark", args: [path("server.mjs"), "--benchmark"] });
+const report = await runChecks(checks);
+process.exitCode = report.exitCode;
+if (!report.failed) console.log("All syntax, safety, isolation, integration, execution-certainty and benchmark checks passed.");

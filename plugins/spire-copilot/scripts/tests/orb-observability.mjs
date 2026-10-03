@@ -26,9 +26,22 @@ assert.equal(compaction.compactState({ ...base, combat_detail: { player: [] } })
 assert.equal(first.orbs[0].passive, 5, "do not apply Focus a second time");
 assert.equal(first.orbs.length, 4, "duplicate types and empty slot are not merged");
 assert.ok(first.advisories.some((hint) => hint.id === "orb-slots"));
+const orbHint = first.advisories.find((hint) => hint.id === "orb-slots").text;
+assert.ok(orbHint.includes("all available slots occupied evokes slot 1"));
+assert.ok(orbHint.includes("Zero capacity or unknown slots"));
 const same = compaction.rememberAndCompact(state(initial, { powers: focus }), true);
 assert.equal(Object.hasOwn(same.delta, "orbs"), false, "unchanged list costs no repeated payload");
 assert.equal((same.advisories ?? []).some((hint) => hint.id === "orb-slots"), false);
+
+// A full queue channel observes FIFO evocation and replacement, not a new
+// passive orb alone. Repeated channeling need not repeat the connection hint.
+const fullQueue = [initial[0], initial[2]];
+compaction.rememberAndCompact(state(fullQueue), true);
+const afterChannel = compaction.rememberAndCompact(state([fullQueue[1],
+  { id: "Frost", passive: 4, evoke: 7 }]), true);
+assert.deepEqual(afterChannel.delta.orbs, [
+  { slot: 1, ...fullQueue[1] }, { slot: 2, id: "Frost", passive: 4, evoke: 7 }]);
+assert.equal((afterChannel.advisories ?? []).some((hint) => hint.id === "orb-slots"), false);
 
 // All orb changes are snapshots, never ID-keyed semantic patches. A rotated
 // queue may have unchanged counts but a different next-to-evoke orb.

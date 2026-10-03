@@ -161,7 +161,10 @@ node plugins/spire-copilot/scripts/test-all.mjs
 
 The complete check includes syntax validation, safety self-tests, runtime
 isolation, HTTP/stdio integration, execution-certainty fault injection, and the
-synthetic byte benchmark. Individual checks remain available:
+synthetic byte benchmark. Independent checks continue after a failure, then
+print a complete pass/fail summary and exit nonzero if any failed (including
+spawn/permission errors or timeouts). Assertions within one stateful test still
+stop that script; failures are never ignored or retried. Individual checks remain available:
 
 ```powershell
 node plugins/spire-copilot/scripts/server.mjs --self-test
