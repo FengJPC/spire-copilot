@@ -2,6 +2,23 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.26] - 2026-10-03
+
+### Fixed
+
+- Preserve combat orb slots in compact state and action/delta receipts, including
+  queue order, duplicate IDs, empty/unknown entries and supplied passive/evoke
+  amounts. Orb deltas replace the whole small ordered list rather than merging
+  by type; missing upstream data stays null instead of inventing an empty list.
+- Expose current signed Focus at player level (zero when absent on an available
+  player; null when unavailable). Preserve upstream empty-slot objects without
+  fabricating an orb type. Vanilla slot 1 is rightmost/first to evoke, not leftmost.
+- Add a once-per-connection orb interface hint and field documentation. Current
+  amounts must not receive Focus twice; omitted upstream amounts remain unknown.
+- Cover upstream enrichment, public compact/delta reads, action receipts,
+  rotation/evocation, Dark-value changes, slot resize, missing/empty data and
+  advisory deduplication/reconnect in regression tests.
+
 ## [0.2.25] - 2026-10-03
 
 ### Added

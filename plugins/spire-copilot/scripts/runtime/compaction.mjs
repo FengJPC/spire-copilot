@@ -276,7 +276,26 @@ export function createCompaction({ config, session }, dependencies = {}) {
       out.potions = Array.isArray(state.run_detail?.potions)
         ? state.run_detail.potions.map((potion, index) => compactPotion(potion, index, true)) : null;
     }
-    if (state.room_phase === "COMBAT") out.stance = currentStance(state);
+    if (state.room_phase === "COMBAT") {
+      out.stance = currentStance(state);
+      const player = state.combat_detail?.player;
+      const orbs = player?.orbs;
+      // Preserve slot order, duplicate IDs and empty/unknown entries. Missing
+      // upstream data is unknown, not an empty orb inventory or zero amounts.
+      out.orbs = Array.isArray(orbs) ? orbs.map((orb, index) => ({
+        slot: index + 1,
+        ...(orb && Object.hasOwn(orb, "id") ? { id: orb.id } : {}),
+        ...(Number.isFinite(orb?.passive) ? { passive: orb.passive } : {}),
+        ...(Number.isFinite(orb?.evoke) ? { evoke: orb.evoke } : {}),
+      })) : null;
+      // Upstream omits powers when none exist; an absent Focus on an available
+      // player is zero. Unavailable/malformed player or power data is unknown.
+      const focus = Array.isArray(player?.powers)
+        ? player.powers.find((power) => power?.id === "Focus") : undefined;
+      out.focus = !player || typeof player !== "object" || Array.isArray(player)
+        || (player.powers !== undefined && !Array.isArray(player.powers))
+        ? null : focus ? (Number.isFinite(focus.amount) ? focus.amount : null) : 0;
+    }
     const detail = state.combat_detail;
     if (detail) {
       out.turn = detail.turn;
@@ -428,6 +447,9 @@ export function createCompaction({ config, session }, dependencies = {}) {
   function diffValue(before, after, key = "") {
     if (JSON.stringify(before) === JSON.stringify(after)) return undefined;
     if (Array.isArray(before) && Array.isArray(after)) {
+      // Orbs are an ordered queue, not an ID-keyed entity set. A replacement
+      // is small and clears stale values when evoking, rotating or resizing.
+      if (key === "orbs") return after;
       if (key === "hand") return handArrayDifference(before, after);
       if (key === "deck") {
         const { removed, added } = multisetDifference(before, after);
