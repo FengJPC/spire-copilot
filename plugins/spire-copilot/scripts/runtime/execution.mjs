@@ -2,7 +2,8 @@
 export function createExecution({ config, session }, dependencies = {}) {
   const { settleMs, timeoutMs, batchTimeoutMs } = config;
   const {
-    choiceCards,
+    choiceCardForAction,
+    shopChoiceForAction,
     decisionState,
     isConnectionError,
     isPlayCardAction,
@@ -27,7 +28,7 @@ export function createExecution({ config, session }, dependencies = {}) {
   } = dependencies;
 
   function actionToolCall(action) {
-    const { action: kind, ...args } = action;
+    const { action: kind, _shop_choice, ...args } = action;
     if (["play_card", "choose", "use_potion", "discard_potion"].includes(kind)) return { name: kind, args };
     if (["end_turn", "proceed", "skip", "cancel", "confirm"].includes(kind)) return { name: kind, args: {} };
     return null;
@@ -45,6 +46,12 @@ export function createExecution({ config, session }, dependencies = {}) {
       ...(action.target_index ? { target: action.target_index } : {}),
       ...(action.choice_text ? { choice: action.choice_text } : {}),
       ...(action.choice_uuid ? { choice_uuid: action.choice_uuid } : {}),
+      ...(action._shop_choice ? {
+        ...(action._shop_choice.kind ? { kind: action._shop_choice.kind } : {}),
+        ...(Number.isFinite(action._shop_choice.price) ? { price: action._shop_choice.price } : {}),
+        ...(action._shop_choice.card_id ? { card_id: action._shop_choice.card_id } : {}),
+        ...(action._shop_choice.item_id ? { item_id: action._shop_choice.item_id } : {}),
+      } : {}),
       ...(!action.choice_text && action.choice_index ? { choice_index: action.choice_index } : {}),
       ...(action.potion_slot ? { potion_slot: action.potion_slot } : {}),
       ...extra,
@@ -52,7 +59,7 @@ export function createExecution({ config, session }, dependencies = {}) {
   }
 
   function publicAction(action) {
-    const { card_uuid, card_key, expected_cost, cost, ...value } = action;
+    const { card_uuid, card_key, expected_cost, cost, _shop_choice, ...value } = action;
     if (card_uuid) {
       delete value.card_index;
       delete value.card_name;
@@ -60,6 +67,12 @@ export function createExecution({ config, session }, dependencies = {}) {
       value.card = card_key ?? session.handHandles.byUuid.get(card_uuid);
     }
     return value;
+  }
+
+  function confirmedShopPurchases(actions) {
+    const purchases = actions.filter((action) => action._shop_choice && action._shop_choice.kind !== "purge")
+      .map((action) => actionSummary(action));
+    return purchases.length ? { purchases } : {};
   }
 
   function failedBatchReceipt(actions, index, error, certainty, stateRefreshError = undefined) {
@@ -82,6 +95,7 @@ export function createExecution({ config, session }, dependencies = {}) {
       reason: errorKind.toUpperCase(),
       completed_actions: index,
       ...(index ? { completed: actions.slice(0, index).map((action) => actionSummary(action)) } : {}),
+      ...confirmedShopPurchases(actions.slice(0, index)),
       failed_action: actionSummary(actions[index]),
       failed_action_status: failedStatus,
       execution_certainty: certainty,
@@ -143,6 +157,16 @@ export function createExecution({ config, session }, dependencies = {}) {
         throw new Error("SAFETY indexed cards require a current-turn observed hand; refresh state");
       }
       normalizedActions = actions.map((action) => normalizeStableCardReference(action, session.observedHandState ?? state));
+      if (!single && state.screen_type === "SHOP_SCREEN") {
+        // Bind planned purchases to the initial full text/price/known identity.
+        // Each dispatch still resolves its index against freshly settled state.
+        normalizedActions = normalizedActions.map((action) => {
+          if (action.action !== "choose") return action;
+          const args = normalizeChooseArgs(state, actionToolCall(action).args);
+          const item = shopChoiceForAction(state, args);
+          return { ...action, choice_text: item.text, _shop_choice: item };
+        });
+      }
       if (isCombatBatch) preflightCombatActions(state, normalizedActions);
     } catch (error) {
       return settleFailedBatchAction({ state, actions, index: 0, error, certainty: "not_sent", timeout });
@@ -173,9 +197,24 @@ export function createExecution({ config, session }, dependencies = {}) {
           if (toolCall) {
             if (toolCall.name === "choose") {
               toolCall = { ...toolCall, args: normalizeChooseArgs(state, toolCall.args) };
-              const selected = choiceCards(state)[toolCall.args.choice_index - 1];
-              action = { ...action, choice_index: toolCall.args.choice_index,
-                ...(selected?.uuid ? { choice_uuid: selected.uuid } : {}) };
+              const shopItem = shopChoiceForAction(state, toolCall.args);
+              if (Number.isFinite(shopItem?.price) && Number.isFinite(state.gold) && shopItem.price > state.gold) {
+                throw new Error("SAFETY insufficient gold for the planned shop item; no purchase was sent");
+              }
+              if (action._shop_choice) {
+                const expected = action._shop_choice;
+                if (!shopItem || shopItem.text !== expected.text || shopItem.price !== expected.price
+                    || ["card_id", "choice_uuid", "item_id"].some((key) => expected[key] && shopItem[key] !== expected[key])) {
+                  throw new Error("SAFETY planned shop item price or identity changed; inspect state before spending");
+                }
+              }
+              const selected = choiceCardForAction(state, toolCall.args);
+              // Do not let caller metadata or a positional fallback contaminate
+              // the receipt/verifier. Freeze identity before this purchase.
+              const { choice_uuid, _shop_choice, ...cleanAction } = action;
+              action = { ...cleanAction, choice_index: toolCall.args.choice_index,
+                ...(selected?.uuid ? { choice_uuid: selected.uuid } : {}),
+                ...(shopItem ? { choice_text: shopItem.text, _shop_choice: shopItem } : {}) };
               normalizedActions[index] = action;
             }
             await validateToolCall(toolCall.name, toolCall.args);
@@ -267,13 +306,15 @@ export function createExecution({ config, session }, dependencies = {}) {
           || state.room_phase !== actionStart.room_phase || state.screen_type !== actionStart.screen_type)) {
         return { halted: true, reason: "SAFETY room or screen changed; inspect the new decision before continuing",
           completed_actions: index + 1, remaining_actions: remaining.map(publicAction),
-          state: rememberAndCompact(state, false, { action: "act_many", completed: index + 1 }) };
+          state: rememberAndCompact(state, false, { action: "act_many", completed: index + 1,
+            ...confirmedShopPurchases(normalizedActions.slice(0, index + 1)) }) };
       }
     }
 
     return rememberAndCompact(state, false, {
       ...(single ? actionSummary(normalizedActions[0])
         : { action: "act_many", completed: normalizedActions.length }),
+      ...(!single ? confirmedShopPurchases(normalizedActions) : {}),
       settlement: "verified",
       execution_certainty: "verified",
       timeout_ms: timeout,

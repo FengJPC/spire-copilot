@@ -25,7 +25,7 @@ export function createProtocol({ config, session }, dependencies = {}) {
     card_index: { type: "integer", minimum: 1 },
     target_index: { type: "integer", minimum: 1, description: "Current enemy index. For play_card, supply when live t=true (target=true in other card payloads); do not infer targeting from card type. Targeted potions use requires_target." },
     choice_index: { type: "integer", minimum: 1 },
-    choice_text: { type: "string" },
+    choice_text: { type: "string", description: "Unique current choice text. Shop purchases, including act_many batches, require this; copied full text binds the displayed price." },
     choice_uuid: { type: "string" },
     potion_slot: { type: "integer", minimum: 1 },
   };
@@ -91,7 +91,7 @@ export function createProtocol({ config, session }, dependencies = {}) {
     },
     {
       name: "act_many",
-      description: "Execute already-decided actions serially; use act when the next decision needs fresh observation. Use card with hand k for exact copies or names for cheapest playable equivalents; card_index refers to the last observed hand, never shifting intermediate positions. Safety preflight may reject the whole batch before sending. Otherwise each action is rechecked by UUID and verified before continuing; unsafe boundaries or errors stop the suffix. Never plan through unknown draws/new choices or resend uncertain actions.",
+      description: "Execute already-decided actions serially; shop purchases may be batched as ordered choose actions with unique choice_text. Copilot binds shop text/price/known identity, resolves each against fresh state and verifies before buying the next; reindexing is safe, changed prices/identity, missing items/funds, new screens or unknown results halt without replay/rollback. Use act across new decisions. Card k selects exact copies; card_index binds to the last observed hand. Safety preflight may reject the whole batch before sending. Never plan through unknown draws/new choices or resend uncertain actions.",
       inputSchema: {
         type: "object",
         properties: {
@@ -201,7 +201,7 @@ export function createProtocol({ config, session }, dependencies = {}) {
           protocolVersion: params.protocolVersion ?? "2024-11-05",
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: "spire-copilot", version: pluginVersion },
-          instructions: "Read get_state and apply advisories. Read current.stance in action/delta receipts; hand c is live current-turn cost, not cached definition cost. Use card with hand k for exact copies or card_name for cheapest playable equivalents; Copilot handles UUID matching and reindexing. Hand changes update key=k, not effect ref. act_many verifies already-decided actions one by one; use act across observation boundaries. Choices use choice_text or choice_uuid; shops require choice_text. Never resend uncertain end_turn; inspect state instead.",
+          instructions: "Read get_state and apply advisories. Read current.stance in action/delta receipts; hand c is live current-turn cost, not cached definition cost. Use card with hand k for exact copies or card_name for cheapest playable equivalents; Copilot handles UUID matching and reindexing. Hand changes update key=k, not effect ref. act_many verifies already-decided actions one by one; shop purchases may be batched with ordered choose plus choice_text, with fresh per-item resolution and bound prices/identities. Use act across observation boundaries. Choices use choice_text or choice_uuid; shops require choice_text. Never resend uncertain end_turn; inspect state instead.",
         },
       };
     }

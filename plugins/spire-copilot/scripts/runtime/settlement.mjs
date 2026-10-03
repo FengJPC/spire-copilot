@@ -5,6 +5,8 @@ export function createSettlement({ config, session }, dependencies = {}) {
     cardForAction,
     cardIdentityMatches,
     choiceCards,
+    choiceCardForAction,
+    shopChoiceForAction,
     decisionState,
     endTurnHasSettled,
     isPlayCardAction,
@@ -154,9 +156,33 @@ export function createSettlement({ config, session }, dependencies = {}) {
     const transition = actionTransitionEvidence(start, state);
     const navigated = ["floor_changed", "room_phase_changed", "screen_changed"].includes(transition);
     if (action.action === "choose") {
+      if (start.screen_type === "SHOP_SCREEN") {
+        const item = shopChoiceForAction(start, action);
+        const list = { card: "cards", relic: "relics", potion: "potions" }[item?.kind];
+        const id = item?.card_id ?? item?.item_id;
+        if (list && id) {
+          const runList = { card: "deck", relic: "relics", potion: "potions" }[item.kind];
+          const count = (items) => items.filter((entry) => entry.id === id && !entry.is_empty).length;
+          const beforeRun = start.run_detail?.[runList], afterRun = state.run_detail?.[runList];
+          if (Array.isArray(beforeRun) && Array.isArray(afterRun) && count(afterRun) > count(beforeRun)) {
+            return "shop_item_acquired";
+          }
+          if (state.screen_type === "SHOP_SCREEN" && Array.isArray(start.screen_state?.[list])
+              && Array.isArray(state.screen_state?.[list])) {
+            const identity = (entry) => item.choice_uuid ? entry.uuid === item.choice_uuid : entry.id === id;
+            if (state.screen_state[list].filter(identity).length < start.screen_state[list].filter(identity).length) {
+              return "shop_item_removed";
+            }
+          }
+          // Affordability filtering or an unrelated screen transition cannot
+          // prove buying this known item. Never fall back to the pure card index.
+          return undefined;
+        }
+        // Purge can open a selection screen; unresolved text-only Mod choices
+        // retain generic option/transition evidence, without inventing a UUID.
+      }
       if (navigated) return transition;
-      const selected = choiceCards(start).find((card) => action.choice_uuid && card.uuid === action.choice_uuid)
-        ?? choiceCards(start)[action.choice_index - 1];
+      const selected = choiceCardForAction(start, action);
       if (selected?.uuid) {
         const selectedIn = (snapshot) => [
           ...(snapshot.screen_state?.selected ?? []), ...(snapshot.screen_state?.selected_cards ?? []),

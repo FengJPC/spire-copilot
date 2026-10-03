@@ -139,6 +139,7 @@ try {
   assert.equal(sent.length, 1);
   const bought = await call("act", { action: "choose", choice_text: first.choices[1].text });
   assert.equal(bought.result.execution_certainty, "verified");
+  assert.equal(bought.result.choice_uuid, "uuid-Affordable");
   assert.equal(sent[1].id, "Affordable");
   const afterPurchase = await call("get_state");
   assert.equal(afterPurchase.advisories, undefined);
@@ -147,6 +148,23 @@ try {
   assert.equal(afterPurchase.choices[0].card_id, "Free");
   assert.equal(afterPurchase.choices[0].i, 1);
   assert.equal(afterPurchase.details.cards[0].id, "ReachHeaven");
+  const boughtFree = await call("act", { action: "choose", choice_text: afterPurchase.choices[0].text });
+  assert.equal(boughtFree.result.choice_uuid, "uuid-Free", "mixed index 1 must not echo the unaffordable first card UUID");
+  assert.equal(boughtFree.result.price, 0);
+
+  // End-to-end HTTP/stdio batch: purge disappears after spending, changing
+  // the second item from index 2 to 1. Freeze each correct item UUID in receipt.
+  state.gold = 100;
+  state.screen_state = { cards: [card("Expensive", "贵牌", 150),
+    card("First", "第一件", 30), card("Second", "第二件", 60)],
+    relics: [], potions: [], purge_available: true, purge_cost: 75 };
+  const basket = await call("act_many", { actions: [
+    { action: "choose", choice_text: "第二件" }, { action: "choose", choice_text: "第一件" },
+  ] });
+  assert.equal(basket.result.completed, 2);
+  assert.deepEqual(basket.result.purchases.map((item) => item.choice_uuid), ["uuid-Second", "uuid-First"]);
+  assert.deepEqual(sent.slice(-2).map((item) => [item.id, item.index]), [["Second", 3], ["First", 1]]);
+  const combatSentCount = sent.length;
 
   state = { in_game: true, ready_for_command: true, floor: 5, room_phase: "COMBAT",
     screen_type: "NONE", room_type: "MonsterRoom", current_hp: 50, max_hp: 50, current_energy: 3, max_energy: 3,
@@ -190,7 +208,7 @@ try {
   const candidate = await call("get_state");
   assert.equal(Object.hasOwn(candidate.hand[1], "p"), false);
   assert.equal(candidate.advisories, undefined);
-  assert.equal(sent.length, 2, "inspection and state checks never mutate the isolated game");
+  assert.equal(sent.length, combatSentCount, "inspection and state checks never mutate the isolated game");
   const wrath = await call("act", { action: "play_card", card_name: "暴怒", target_index: 1 });
   assert.equal(wrath.current.stance, "Wrath");
   assert.equal(wrath.changes.stance, "Wrath");
@@ -205,7 +223,7 @@ try {
   assert.equal(neutral.changes.stance, "Neutral");
   assert.equal(neutral.changes.enemies.changed[0].atk, 38);
   assert.equal(neutral.result.execution_certainty, "verified");
-  assert.equal(sent.length, 4);
+  assert.equal(sent.length, combatSentCount + 2);
   console.log("Shop/observability integration passed: affordable-item identity, reindex guards, duplicate potion slots, negative-only playability wire transitions, first-hand hint, and Neutral/Wrath action/delta snapshots.");
 } finally {
   for (const entry of pending.values()) clearTimeout(entry.timer);

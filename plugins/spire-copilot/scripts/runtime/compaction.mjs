@@ -161,7 +161,7 @@ export function createCompaction({ config, session }, dependencies = {}) {
   function compactShopChoices(state) {
     const details = state.screen_state ?? {};
     const normalizedName = (name) => typeof name === "string" ? name.normalize("NFKC").trim() : undefined;
-    return state.choice_list.map((text, index) => {
+    return (Array.isArray(state.choice_list) ? state.choice_list : []).map((text, index) => {
       const base = { i: index + 1, text };
       if (typeof text !== "string") return base;
       const priceMatch = text.match(/\((\d+)\s+gold\)\s*$/i);
@@ -182,6 +182,7 @@ export function createCompaction({ config, session }, dependencies = {}) {
       // A zero-price card has no suffix in the upstream formatter. Missing
       // prices on other item types cannot establish an identity safely.
       const expectedPrice = price ?? (kind === "card" ? 0 : undefined);
+      if (Number.isFinite(expectedPrice)) tagged.price = expectedPrice;
       const items = Array.isArray(details[list]) ? details[list] : [];
       const candidates = items.filter((item) => normalizedName(item?.name) === normalizedName(match[1])
         && Number.isFinite(expectedPrice) && item?.price === expectedPrice);
@@ -192,6 +193,26 @@ export function createCompaction({ config, session }, dependencies = {}) {
         ...(item.uuid ? { choice_uuid: item.uuid } : {}), ...compactChoiceCard(item) };
       return { ...tagged, ...(item.id ? { item_id: item.id } : {}) };
     });
+  }
+
+  function shopChoiceForAction(state, action) {
+    if (state?.screen_type !== "SHOP_SCREEN" || !Number.isInteger(action?.choice_index)) return undefined;
+    const choice = compactShopChoices(state)[action.choice_index - 1];
+    if (!choice) return undefined;
+    const { text, kind, price, card_id, choice_uuid, item_id } = choice;
+    return { text, ...(kind ? { kind } : {}), ...(Number.isFinite(price) ? { price } : {}),
+      ...(card_id ? { card_id } : {}), ...(choice_uuid ? { choice_uuid } : {}),
+      ...(item_id ? { item_id } : {}) };
+  }
+
+  function choiceCardForAction(state, action) {
+    if (state?.screen_type === "SHOP_SCREEN") {
+      const item = shopChoiceForAction(state, action);
+      // The mixed/filtered purchase index never indexes the pure card list.
+      return item?.kind === "card" && item.choice_uuid ? { uuid: item.choice_uuid, id: item.card_id } : undefined;
+    }
+    return choiceCards(state).find((card) => action?.choice_uuid && card.uuid === action.choice_uuid)
+      ?? choiceCards(state)[action?.choice_index - 1];
   }
 
   function compactScreenDetails(state) {
@@ -528,6 +549,8 @@ export function createCompaction({ config, session }, dependencies = {}) {
     compactScreenCard,
     compactStoreItem,
     compactShopChoices,
+    shopChoiceForAction,
+    choiceCardForAction,
     compactScreenDetails,
     compactRunContext,
     compactState,

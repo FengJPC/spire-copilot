@@ -30,6 +30,7 @@ await node([path("tests/runtime-isolation.mjs")]);
 await node([path("tests/terminal-settlement.mjs")]);
 await node([path("tests/observability.mjs")]);
 await node([path("tests/orb-observability.mjs")]);
+await node([path("tests/shop-batches.mjs")]);
 await node([path("tests/interface-advisories.mjs")]);
 await node([path("test-hand-actions.mjs")]);
 await node([path("test-shop-observability.mjs")]);

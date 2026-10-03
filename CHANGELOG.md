@@ -2,6 +2,28 @@
 
 All notable changes to Spire Copilot are documented here.
 
+## [0.2.27] - 2026-10-03
+
+### Fixed
+
+- Shop receipt and settlement identities reuse the compact choice name+price
+  match, never a mixed purchase index into the pure card list. Non-card or
+  unmatched choices do not acquire an unrelated card UUID. Known purchases
+  require item acquisition or canonical stock removal, not affordability changes.
+
+### Added
+
+- Explicit support and guidance for ordered shop purchase batches via act_many.
+  Planned full text/price/known identities are bound once, each item is resolved
+  against settled state and verified before the next; ordinary reindexing is
+  safe. Price/identity changes, missing or ambiguous items, insufficient funds,
+  new screens and unknown outcomes halt without replay, substitution or rollback.
+- Compact purchases summaries list verified items only, including partial
+  completion. Skill, references, MCP descriptions and first-shop advisory agree.
+- Regression coverage for mixed/filtered lists, repeated buys and reindexing,
+  free/non-card identities, changed prices/UUIDs, funds, selection screens,
+  missing/ambiguous items and lost replies with no replay/continuation.
+
 ## [0.2.26] - 2026-10-03
 
 ### Fixed

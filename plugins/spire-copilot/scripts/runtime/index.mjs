@@ -52,6 +52,8 @@ export function createRuntime({ env = process.env, config: overrides = {} } = {}
     cardForAction: (...args) => modules.cards.cardForAction(...args),
     cardIdentityMatches: (...args) => modules.cards.cardIdentityMatches(...args),
     choiceCards: (...args) => modules.cards.choiceCards(...args),
+    choiceCardForAction: (...args) => modules.compaction.choiceCardForAction(...args),
+    shopChoiceForAction: (...args) => modules.compaction.shopChoiceForAction(...args),
     decisionState: (...args) => modules.state.decisionState(...args),
     endTurnHasSettled: (...args) => modules.safety.endTurnHasSettled(...args),
     isPlayCardAction: (...args) => modules.safety.isPlayCardAction(...args),
@@ -69,7 +71,8 @@ export function createRuntime({ env = process.env, config: overrides = {} } = {}
     pendingCardDefinitionPayload: (...args) => modules.cards.pendingCardDefinitionPayload(...args),
   });
   modules.execution = createExecution(context, {
-    choiceCards: (...args) => modules.cards.choiceCards(...args),
+    choiceCardForAction: (...args) => modules.compaction.choiceCardForAction(...args),
+    shopChoiceForAction: (...args) => modules.compaction.shopChoiceForAction(...args),
     decisionState: (...args) => modules.state.decisionState(...args),
     isConnectionError: (...args) => modules.shared.isConnectionError(...args),
     isPlayCardAction: (...args) => modules.safety.isPlayCardAction(...args),
